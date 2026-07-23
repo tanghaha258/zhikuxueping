@@ -1,0 +1,47 @@
+# Environment and secrets
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+project/backend/venv/
+project/backend/.venv/
+
+# Node and frontend builds
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Runtime data and user uploads
+project/backend/data/
+project/backend/backups/
+project/backend/uploads/
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs and local diagnostics
+*.log
+/payload*.json
+/response*.json
+/nul
+
+# IDE, OS, and local agent state
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.gstack/
+.superpowers/
+.trae/

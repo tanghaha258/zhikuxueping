@@ -1,0 +1,49 @@
+// ============================================================
+// Element Plus 主题变量覆盖
+// ============================================================
+
+// 主色调 - 教育蓝
+$--color-primary: #409EFF;
+$--color-primary-light-3: #79bbff;
+$--color-primary-light-5: #a0cfff;
+$--color-primary-light-7: #c6e2ff;
+$--color-primary-light-8: #d9ecff;
+$--color-primary-light-9: #ecf5ff;
+$--color-primary-dark-2: #337ecc;
+
+// 辅助色
+$--color-success: #67c23a;
+$--color-warning: #e6a23c;
+$--color-danger: #f56c6c;
+$--color-info: #909399;
+
+// 文字色
+$--text-primary: #303133;
+$--text-regular: #606266;
+$--text-secondary: #909399;
+$--text-placeholder: #c0c4cc;
+
+// 边框
+$--border-base: #dcdfe6;
+$--border-light: #e4e7ed;
+$--border-lighter: #ebeef5;
+$--border-radius-base: 4px;
+$--border-radius-small: 2px;
+$--border-radius-round: 20px;
+
+// 阴影
+$--box-shadow-base: 0 2px 4px rgba(0, 0, 0, 0.12), 0 0 6px rgba(0, 0, 0, 0.04);
+$--box-shadow-light: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
+
+// 字体
+$--font-size-extra-large: 20px;
+$--font-size-large: 18px;
+$--font-size-medium: 16px;
+$--font-size-base: 14px;
+$--font-size-small: 13px;
+$--font-size-extra-small: 12px;
+
+// 布局
+$--sidebar-width: 240px;
+$--sidebar-collapsed-width: 64px;
+$--header-height: 60px;

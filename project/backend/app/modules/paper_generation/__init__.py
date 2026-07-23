@@ -1,0 +1,1 @@
+"""Paper-generation domain modules."""
