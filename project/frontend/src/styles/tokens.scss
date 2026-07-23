@@ -1,0 +1,64 @@
+// ============================================================
+// 通用 UI 设计令牌（Task 1）
+// 唯一来源：docs/superpowers/plans/2026-07-24-zhi-kua-xue-ping-full-rebuild.md §2.2
+// 中性浅灰背景 + 白色内容区；蓝色仅主操作，绿色完成，琥珀待处理，红色阻断。
+// 字号固定 12/14/16/20/24px，圆角 4/6px（工具卡与模态框最大 8px）。
+// ============================================================
+
+:root {
+  // 背景与表面
+  --ui-bg-app: #f4f6f8;
+  --ui-bg-surface: #ffffff;
+  --ui-bg-subtle: #f8f9fb;
+
+  // 文字
+  --ui-text-primary: #1f2933;
+  --ui-text-secondary: #52606d;
+  --ui-text-muted: #7b8794;
+
+  // 边框
+  --ui-border: #d9dee5;
+  --ui-border-light: #e8ebef;
+
+  // 语义色
+  --ui-primary: #2463a7;
+  --ui-success: #2f7d4a;
+  --ui-warning: #a86412;
+  --ui-danger: #b43a3a;
+
+  // 圆角（页面 4/6px；工具卡与模态框最大 8px）
+  --ui-radius-sm: 4px;
+  --ui-radius-md: 6px;
+  --ui-radius-lg: 8px;
+
+  // 间距
+  --ui-space-1: 4px;
+  --ui-space-2: 8px;
+  --ui-space-3: 12px;
+  --ui-space-4: 16px;
+  --ui-space-6: 24px;
+  --ui-space-8: 32px;
+
+  // 布局
+  --ui-header-height: 56px;
+  --ui-sidebar-width: 224px;
+  --ui-sidebar-collapsed-width: 64px;
+  --ui-content-max: 1440px;
+
+  // 字号（固定，不随视口缩放）
+  --ui-font-size-xs: 12px;
+  --ui-font-size-sm: 14px;
+  --ui-font-size-md: 16px;
+  --ui-font-size-lg: 20px;
+  --ui-font-size-xl: 24px;
+
+  // 焦点
+  --ui-focus-ring: 0 0 0 2px rgba(36, 99, 167, 0.35);
+
+  // 状态色映射（供 StatusBadge 等引用）
+  --ui-tone-primary: var(--ui-primary);
+  --ui-tone-success: var(--ui-success);
+  --ui-tone-warning: var(--ui-warning);
+  --ui-tone-danger: var(--ui-danger);
+  --ui-tone-muted: var(--ui-text-muted);
+}
