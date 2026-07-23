@@ -15,6 +15,8 @@ from app.modules.ai_jobs.router import router as ai_jobs_router
 from app.modules.submissions.student_router import router as student_submissions_router
 from app.modules.improvements.router import router as improvements_router
 from app.modules.operational_evidence.router import router as operational_evidence_router
+# 统一项目上下文（Task 3）
+from app.modules.project_workspace.router import router as project_workspace_router
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(auth_router)
@@ -40,4 +42,5 @@ api_router.include_router(ai_jobs_router)
 api_router.include_router(student_submissions_router)
 api_router.include_router(improvements_router)
 api_router.include_router(operational_evidence_router)
- 
+api_router.include_router(project_workspace_router)
+
