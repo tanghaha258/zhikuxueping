@@ -90,6 +90,11 @@ from app.models.enums import (
     ImprovementSuggestionStatus,
     ImprovementTaskType,
 )
+# 重构上下文域（Task 2 / M1）：项目阶段、工具上下文、学情快照、迁移幂等记录
+from app.models.project_stage import ProjectStageProgress
+from app.models.tool_context import ToolContextLink
+from app.models.project_learning_insight import ProjectLearningInsight
+from app.models.migration_ledger import MigrationLedger
 
 __all__ = [
     "User", "Role", "School", "Class", "Subject",
@@ -127,4 +132,7 @@ __all__ = [
     "ImprovementSuggestion", "ImprovementTask", "SecondEvaluation",
     # 运营证据领域（Task 8）
     "OperationalMetric", "EvidenceLedger", "ExportRecord",
+    # 重构上下文域（Task 2 / M1）
+    "ProjectStageProgress", "ToolContextLink",
+    "ProjectLearningInsight", "MigrationLedger",
 ]
