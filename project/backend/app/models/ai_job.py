@@ -45,11 +45,23 @@ class AiJob(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
     )
-    project_id: Mapped[str] = mapped_column(
+    project_id: Mapped[Optional[str]] = mapped_column(
         String(36),
         ForeignKey("projects.id", ondelete="CASCADE"),
-        nullable=False,
-        comment="所属项目 ID（grading 场景也关联项目）",
+        nullable=True,
+        comment="所属项目 ID（独立模式为空，项目模式必填，由服务层校验）",
+    )
+    # 工具上下文模式：INDEPENDENT=独立使用，PROJECT=关联项目。
+    # 独立模式 project_id 为空；项目模式由服务层强制要求 project_id 非空。
+    context_mode: Mapped[Optional[str]] = mapped_column(
+        String(20),
+        nullable=True,
+        comment="工具上下文模式: INDEPENDENT/PROJECT",
+    )
+    project_phase: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        nullable=True,
+        comment="项目阶段（项目模式时标记 AI 产出的阶段位置）",
     )
     scene: Mapped[AiJobScene] = mapped_column(
         nullable=False,
