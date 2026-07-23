@@ -9,7 +9,9 @@ import router from './router'
 import { registerSessionExpiredHandler } from '@/shared/auth/session'
 import { useUserStore } from '@/stores/user'
 
-// 全局样式
+// 全局样式（令牌先行，骨架次之，全局基础最后）
+import './styles/tokens.scss'
+import './styles/layout.scss'
 import './styles/global.scss'
 
 const app = createApp(App)

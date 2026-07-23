@@ -1,0 +1,90 @@
+// ============================================================
+// 页面骨架布局（Task 1）
+// 来源：plan §2.3 页面骨架
+// ApplicationShell > { GlobalHeader, PrimarySidebar, PageCanvas }
+// PageCanvas > { PageHeader, ContextBar, InlineAlert, PageBody, StickyActionBar }
+// 不使用悬浮大卡片或卡片嵌套；信息密度适中。
+// ============================================================
+
+.ui-app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--ui-bg-app);
+  color: var(--ui-text-primary);
+  font-size: var(--ui-font-size-sm);
+  line-height: 1.5;
+}
+
+.ui-app-header {
+  height: var(--ui-header-height);
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-4);
+  padding: 0 var(--ui-space-6);
+  background: var(--ui-bg-surface);
+  border-bottom: 1px solid var(--ui-border);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.ui-app-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.ui-app-sidebar {
+  width: var(--ui-sidebar-width);
+  flex: 0 0 auto;
+  background: var(--ui-bg-surface);
+  border-right: 1px solid var(--ui-border);
+  padding: var(--ui-space-4) 0;
+  overflow-y: auto;
+
+  &.is-collapsed {
+    width: var(--ui-sidebar-collapsed-width);
+  }
+}
+
+.ui-page-canvas {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--ui-space-6);
+  max-width: var(--ui-content-max);
+  width: 100%;
+  margin: 0 auto;
+  gap: var(--ui-space-4);
+}
+
+.ui-page-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-4);
+}
+
+// 响应式：>=1200 完整侧栏；768-1199 折叠；<768 单列
+@media (max-width: 1199px) {
+  .ui-app-sidebar {
+    width: var(--ui-sidebar-collapsed-width);
+  }
+}
+
+@media (max-width: 767px) {
+  .ui-app-body {
+    flex-direction: column;
+  }
+  .ui-app-sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--ui-border);
+  }
+  .ui-page-canvas {
+    padding: var(--ui-space-3);
+  }
+}

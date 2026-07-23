@@ -126,3 +126,87 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+// ============================================================
+// 通用 UI 基座基础（Task 1）
+// 令牌来自 tokens.scss；以下仅设置不影响既有页面的全局基础。
+// ============================================================
+
+body {
+  background: var(--ui-bg-app);
+  color: var(--ui-text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  font-size: var(--ui-font-size-sm);
+}
+
+// 通用可点击控件最小命中区
+.ui-clickable {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ui-space-2);
+  padding: 0 var(--ui-space-4);
+  border-radius: var(--ui-radius-md);
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg-surface);
+  color: var(--ui-text-primary);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+
+  &:hover {
+    background: var(--ui-bg-subtle);
+  }
+
+  &:focus-visible {
+    outline: none;
+    box-shadow: var(--ui-focus-ring);
+  }
+
+  &:disabled,
+  &[aria-disabled='true'] {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+}
+
+.ui-clickable--primary {
+  background: var(--ui-primary);
+  border-color: var(--ui-primary);
+  color: #fff;
+
+  &:hover {
+    background: #1f548c;
+    border-color: #1f548c;
+  }
+}
+
+.ui-clickable--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ui-text-secondary);
+}
+
+// 纯图标按钮最小 40x40
+.ui-icon-button {
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0;
+}
+
+// 通用文本与卡片基类（圆角不超过 8px）
+.ui-surface {
+  background: var(--ui-bg-surface);
+  border: 1px solid var(--ui-border-light);
+  border-radius: var(--ui-radius-lg);
+  padding: var(--ui-space-4);
+}
+
+.ui-text-muted {
+  color: var(--ui-text-muted);
+}
+
+.ui-text-secondary {
+  color: var(--ui-text-secondary);
+}
