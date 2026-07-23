@@ -1,68 +1,158 @@
 <script setup lang="ts">
 /**
- * ProjectWorkspaceLayout - 项目工作区父布局（计划 3.5）。
+ * ProjectWorkspaceLayout - 项目工作区外壳（Task 4 重写）。
  *
- * 顶部展示项目标题、状态、班级、核心学科、完整度与最近保存时间；
- * 左侧阶段导航在总览/设计之间切换，并提供旧版详情入口（保护现有功能）；
- * 右侧下一步操作由确定性规则产生（resolveNextStep）。
- *
- * 项目与完整性校验结果通过 provide 注入子视图，避免重复请求。
+ * 设计要点（计划 Task 4 Step 3 / 规格 §5.2）：
+ * - 复用 Task 1 的 PageHeader、ProjectPhaseStepper、AsyncState。
+ * - 通过 Task 3 的 project-context store 读取项目、阶段、权限和唯一主操作；
+ *   上下文在本外壳加载一次，子页共享，不重复请求项目详情。
+ * - 顶部固定项目状态、班级、阶段和唯一主操作；归档时全部编辑动作只读。
+ * - 为兼容尚未迁移的旧子页（ProjectOverviewView/ProjectDesignView 等，归后续 Task），
+ *   保留 workspace* provide/inject 合同，但数据源改为 store 派生，
+ *   不再单独调用 getProjectApi/validateActivationApi。
  */
-import { computed, onMounted, provide, ref } from 'vue'
-import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
-import { ElMessageBox } from 'element-plus'
-import { getProjectApi } from '@/api/projects'
+import { computed, onMounted, onBeforeUnmount, provide, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useProjectContextStore } from '@/features/project-context/store'
+import type {
+  PhaseKey,
+  PhaseStatus,
+  ProjectWorkspacePhase,
+} from '@/features/project-context/types'
+import PageHeader from '@/shared/ui/PageHeader.vue'
+import ProjectPhaseStepper from '@/shared/ui/ProjectPhaseStepper.vue'
+import AsyncState from '@/shared/ui/AsyncState.vue'
 import { listSubjectsApi } from '@/api/subjects'
 import { listClassesBySchoolApi } from '@/api/schools'
 import { useUserStore } from '@/stores/user'
-import {
-  resolveNextStep,
-  canEditDesign,
-} from '@/features/project-workspace/composables/useProjectWorkspace'
-import { validateActivationApi } from '@/features/project-workspace/api'
 import type { Project, SubjectItem, ClassItem } from '@/types'
-import type {
-  ProjectValidationResult,
-} from '@/features/project-workspace/types'
-import {
-  PROJECT_STATUS_LABELS,
-  PROJECT_STATUS_TYPES,
-} from '@/utils/constants'
-import { formatDate } from '@/utils/format'
+import type { ProjectValidationResult } from '@/features/project-workspace/types'
+import { PROJECT_STATUS_LABELS } from '@/utils/constants'
 
+// ── 路由与 store ───────────────────────────────────────────────
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
+const store = useProjectContextStore()
 
 const projectId = computed(() => route.params.id as string)
 
-const project = ref<Project | null>(null)
-const validation = ref<ProjectValidationResult | null>(null)
+// ── 阶段固定映射（与后端 PHASE_ORDER 单一来源一致）──────────────
+const PHASE_LABELS: Record<PhaseKey, string> = {
+  diagnosis: '学情诊断',
+  design: '跨学科设计',
+  preparation: '备课与资源',
+  implementation: '教学实施',
+  evaluation: '评价与反馈',
+  improvement: '改进与再评价',
+  closure: '结项',
+}
+
+/** 阶段 → 项目工作区路由名映射；用于阶段导航点击。 */
+const PHASE_ROUTE_NAME: Record<PhaseKey, string> = {
+  diagnosis: 'ProjectDiagnosis',
+  design: 'ProjectDesign',
+  preparation: 'ProjectPreparation',
+  implementation: 'ProjectTaskChain',
+  evaluation: 'ProjectEvaluation',
+  improvement: 'ProjectInsights',
+  closure: 'ProjectClosure',
+}
+
+function mapPhaseStatus(
+  status: PhaseStatus,
+): 'done' | 'current' | 'warning' | 'blocked' | 'pending' {
+  switch (status) {
+    case 'completed':
+      return 'done'
+    case 'in_progress':
+      return 'current'
+    case 'blocked':
+      return 'blocked'
+    default:
+      return 'pending'
+  }
+}
+
+// ── 学校级元数据（学科、班级），非项目详情，独立加载一次 ─────────
 const subjects = ref<SubjectItem[]>([])
 const classes = ref<ClassItem[]>([])
-const loading = ref(false)
-const error = ref<string | null>(null)
 
-// 阶段导航：总览/设计/资源/任务链为本任务实现；评价/AI 暂指向旧版详情
-const navItems = computed(() => [
-  { name: 'ProjectOverview', label: '总览', disabled: false },
-  { name: 'ProjectDesign', label: '设计', disabled: false },
-  { name: 'ProjectResources', label: '资源', disabled: false },
-  { name: 'ProjectTaskChain', label: '任务链', disabled: false },
-  { name: 'ProjectEvaluationPlan', label: '评价计划', disabled: false },
-  { name: 'ProjectReview', label: '复核', disabled: false },
-  { name: 'ProjectAiContent', label: 'AI 内容', disabled: false },
-  { name: 'ProjectInsights', label: '学情', disabled: false },
-  { name: 'ProjectClosure', label: '结项', disabled: false },
-  { name: 'ProjectDetail', label: '评价·AI（旧版）', disabled: false },
-])
+async function loadSchoolMeta() {
+  const schoolId = userStore.userInfo?.schoolId
+  const [subjRes, clsRes] = await Promise.all([
+    listSubjectsApi().catch(() => ({ data: { data: [] as SubjectItem[] } })),
+    schoolId
+      ? listClassesBySchoolApi(schoolId).catch(() => ({ data: { data: [] as ClassItem[] } }))
+      : Promise.resolve({ data: { data: [] as ClassItem[] } }),
+  ])
+  subjects.value = subjRes.data.data
+  classes.value = (clsRes.data.data as ClassItem[]) || []
+}
 
-const activeName = computed(() => route.name as string)
+// ── 上下文加载（唯一项目详情请求）──────────────────────────────
+async function loadContext() {
+  if (!projectId.value) return
+  await store.loadContext(projectId.value)
+}
 
-const coreSubjectName = computed(() => {
-  const id = project.value?.coreSubjectId
-  if (!id) return '未指定'
-  return subjects.value.find((s) => s.id === id)?.name || '未指定'
+async function reloadAll() {
+  await Promise.all([store.refreshContext(), loadSchoolMeta()])
+}
+
+onMounted(async () => {
+  await Promise.all([loadContext(), loadSchoolMeta()])
+})
+
+watch(projectId, (next, prev) => {
+  if (next && next !== prev) {
+    loadContext()
+  }
+})
+
+onBeforeUnmount(() => {
+  // 离开项目工作区时清空上下文缓存，避免回到列表后残留
+  store.clear()
+})
+
+// ── 派生状态 ───────────────────────────────────────────────────
+const context = computed(() => store.currentContext)
+const loading = computed(() => store.loading)
+const errorState = computed(() => store.error)
+
+const asyncState = computed<'loading' | 'ready' | 'empty' | 'error' | 'forbidden'>(() => {
+  if (loading.value && !context.value) return 'loading'
+  if (errorState.value?.forbidden) return 'forbidden'
+  if (errorState.value && !context.value) return 'error'
+  if (!context.value) return 'loading'
+  return 'ready'
+})
+
+const errorMessage = computed(() => {
+  if (!errorState.value) return ''
+  if (errorState.value.notFound) return '项目不存在或已删除'
+  return errorState.value.message || '加载失败'
+})
+
+// ── 项目摘要与顶部信息 ─────────────────────────────────────────
+const project = computed(() => context.value?.project ?? null)
+const projectTitle = computed(() => project.value?.title || '项目工作区')
+const projectStatusLabel = computed(
+  () => PROJECT_STATUS_LABELS[project.value?.status ?? ''] || project.value?.status || '—',
+)
+const projectStatusTone = computed<'primary' | 'success' | 'warning' | 'danger' | 'muted'>(() => {
+  switch (project.value?.status) {
+    case 'active':
+      return 'primary'
+    case 'completed':
+      return 'success'
+    case 'pending_review':
+      return 'warning'
+    case 'archived':
+      return 'muted'
+    default:
+      return 'muted'
+  }
 })
 
 const className = computed(() => {
@@ -74,140 +164,156 @@ const className = computed(() => {
   return names.length > 0 ? names.join('、') : '未分配'
 })
 
-const completionPct = computed(() =>
-  Math.round((validation.value?.completion ?? 0) * 100),
-)
+const gradeName = computed(() => project.value?.grade || '未设置')
 
-const nextStep = computed(() =>
-  resolveNextStep(
-    projectId.value,
-    project.value?.status || 'draft',
-    validation.value,
-    null,
-  ),
-)
+const activePhase = computed<ProjectWorkspacePhase | null>(() => store.activePhase ?? null)
+const activePhaseLabel = computed(() => {
+  if (!activePhase.value) return '全部阶段已完成'
+  return PHASE_LABELS[activePhase.value.phase] ?? activePhase.value.phase
+})
 
-const editable = computed(() =>
-  canEditDesign(project.value?.status || 'draft'),
-)
+// ── 阶段步进器 ─────────────────────────────────────────────────
+const stepperPhases = computed(() => {
+  const ctx = context.value
+  if (!ctx) return []
+  return ctx.phases.map((p) => ({
+    key: p.phase,
+    label: PHASE_LABELS[p.phase] ?? p.phase,
+    status: mapPhaseStatus(p.status),
+  }))
+})
 
-async function loadProject() {
-  loading.value = true
-  error.value = null
-  try {
-    const [projRes, valRes] = await Promise.all([
-      getProjectApi(projectId.value),
-      validateActivationApi(projectId.value).catch(() => null),
-    ])
-    project.value = projRes.data.data
-    if (valRes) validation.value = valRes.data.data
-    // 并行加载学科与班级元数据
-    const schoolId = userStore.userInfo?.schoolId
-    const [subjRes, clsRes] = await Promise.all([
-      listSubjectsApi(),
-      schoolId
-        ? listClassesBySchoolApi(schoolId)
-        : Promise.resolve({ data: { data: [] as ClassItem[] } }),
-    ])
-    subjects.value = subjRes.data.data
-    classes.value = (clsRes.data.data as ClassItem[]) || []
-  } catch (e) {
-    error.value = (e as Error).message
-  } finally {
-    loading.value = false
+function handlePhaseSelect(key: string) {
+  if (!projectId.value) return
+  const phase = key as PhaseKey
+  const routeName = PHASE_ROUTE_NAME[phase]
+  if (routeName) {
+    router.push({ name: routeName, params: { id: projectId.value } })
   }
 }
 
-function goNextStep() {
-  if (!nextStep.value.actionable) return
-  router.push(nextStep.value.route)
-}
-
-function handleNav(name: string) {
-  router.push({ name, params: { id: projectId.value } })
-}
-
-// 离开保护：加载失败时不阻拦
-onBeforeRouteLeave((_to, _from) => {
-  // 工作区子路由间切换不拦截；仅在同窗口跳出到非工作区时由各子视图自行提示
-  return true
+// ── 唯一主操作 ─────────────────────────────────────────────────
+const primaryAction = computed(() => store.primaryAction)
+const primaryLabel = computed(() => {
+  if (store.isArchived) return ''
+  return primaryAction.value?.label || ''
 })
 
-onMounted(loadProject)
+function handlePrimary() {
+  const action = primaryAction.value
+  if (!action || store.isArchived) return
+  if (action.route) {
+    router.push(action.route)
+  }
+}
 
-// 注入给子视图
-provide('workspaceProject', project)
-provide('workspaceValidation', validation)
+// ── 归档只读 ───────────────────────────────────────────────────
+const archived = computed(() => store.isArchived)
+
+// ── 兼容旧子页 provide/inject 合同 ─────────────────────────────
+// 旧子页（ProjectOverviewView/ProjectDesignView 等）inject workspace* Ref；
+// 数据源统一从 store 派生，不再单独请求 getProjectApi/validateActivationApi。
+const workspaceProject = computed<Project | null>(() => {
+  const p = project.value
+  if (!p) return null
+  return {
+    id: p.id,
+    title: p.title,
+    description: p.description ?? undefined,
+    status: p.status,
+    creatorId: p.creatorId,
+    schoolId: p.schoolId ?? undefined,
+    grade: p.grade ?? undefined,
+    startDate: p.startDate ?? undefined,
+    endDate: p.endDate ?? undefined,
+    isTemplate: false,
+    createdAt: p.createdAt ?? undefined,
+    subjectIds: p.subjectIds,
+    classIds: p.classIds,
+    projectType: p.projectType ?? undefined,
+    coreSubjectId: p.coreSubjectId ?? undefined,
+    reviewStatus: p.reviewStatus ?? undefined,
+  }
+})
+
+const workspaceValidation = computed<ProjectValidationResult | null>(() => {
+  const ctx = context.value
+  if (!ctx) return null
+  const total = ctx.phases.length
+  const completed = ctx.phases.filter((p) => p.status === 'completed').length
+  return {
+    canActivate: ctx.blockers.length === 0,
+    blockers: ctx.blockers.map((b) => ({ code: b.code, field: b.field, message: b.message })),
+    warnings: ctx.warnings.map((w) => ({ code: w.code, field: w.field, message: w.message })),
+    completion: total > 0 ? completed / total : 0,
+    details: {},
+  }
+})
+
+const workspaceEditable = computed(() => store.canManage && !store.isArchived)
+
+provide('workspaceProject', workspaceProject)
+provide('workspaceValidation', workspaceValidation)
 provide('workspaceSubjects', subjects)
 provide('workspaceClasses', classes)
-provide('workspaceEditable', editable)
-provide('workspaceReload', loadProject)
+provide('workspaceEditable', workspaceEditable)
+provide('workspaceReload', reloadAll)
 </script>
 
 <template>
-  <div class="workspace-layout">
+  <div class="workspace-layout" data-ui="project-workspace">
+    <!-- 顶部：项目状态、班级、阶段、唯一主操作（固定） -->
     <header class="workspace-header">
-      <div class="header-top">
-        <el-link
-          :underline="false"
-          href="#/teacher/projects"
-          class="back-link"
-        >
-          <el-icon><ArrowLeft /></el-icon> 项目列表
-        </el-link>
-        <h2 class="project-title">{{ project?.title || '加载中…' }}</h2>
-      </div>
+      <PageHeader
+        :title="projectTitle"
+        :status="{ label: projectStatusLabel, tone: projectStatusTone }"
+        :primary-label="primaryLabel"
+        :breadcrumbs="[
+          { label: '智跨学评' },
+          { label: '我的跨学科项目', to: '/teacher/projects' },
+        ]"
+        @primary="handlePrimary"
+      />
 
-      <div v-if="project" class="header-meta">
-        <el-tag
-          size="small"
-          :type="(PROJECT_STATUS_TYPES[project.status] as any) || 'info'"
-        >
-          {{ PROJECT_STATUS_LABELS[project.status] || project.status }}
-        </el-tag>
-        <span class="meta-item">年级：{{ project.grade || '未设置' }}</span>
-        <span class="meta-item">班级：{{ className }}</span>
-        <span class="meta-item">核心学科：{{ coreSubjectName }}</span>
-        <span class="meta-item">
-          完整度：
-          <span class="completion">{{ completionPct }}%</span>
+      <!-- 上下文条：班级、年级、当前阶段；归档提示 -->
+      <div class="workspace-context-bar">
+        <div class="workspace-context-bar__group">
+          <span class="workspace-context-bar__item">
+            <span class="workspace-context-bar__k">班级</span>
+            <span class="workspace-context-bar__v">{{ className }}</span>
+          </span>
+          <span class="workspace-context-bar__item">
+            <span class="workspace-context-bar__k">年级</span>
+            <span class="workspace-context-bar__v">{{ gradeName }}</span>
+          </span>
+          <span class="workspace-context-bar__item">
+            <span class="workspace-context-bar__k">当前阶段</span>
+            <span class="workspace-context-bar__v">{{ activePhaseLabel }}</span>
+          </span>
+        </div>
+        <span v-if="archived" class="workspace-context-bar__archived" role="status">
+          项目已归档，全部内容只读
         </span>
       </div>
 
-      <div class="header-body">
-        <nav class="stage-nav">
-          <button
-            v-for="item in navItems"
-            :key="item.name"
-            type="button"
-            class="stage-nav-item"
-            :class="{ active: activeName === item.name }"
-            :disabled="item.disabled"
-            @click="handleNav(item.name)"
-          >
-            {{ item.label }}
-          </button>
-        </nav>
-
-        <div class="header-actions">
-          <el-button
-            type="primary"
-            :disabled="!nextStep.actionable"
-            @click="goNextStep"
-          >
-            {{ nextStep.label }}
-          </el-button>
-        </div>
-      </div>
-
-      <div v-if="error" class="header-error">
-        加载失败：{{ error }}
-        <el-button text type="primary" @click="loadProject">重试</el-button>
+      <!-- 阶段步进器 -->
+      <div v-if="stepperPhases.length" class="workspace-stepper">
+        <ProjectPhaseStepper
+          :phases="stepperPhases"
+          @select="handlePhaseSelect"
+        />
       </div>
     </header>
 
-    <main class="workspace-content" v-loading="loading">
-      <router-view />
+    <!-- 主内容：AsyncState 包裹 router-view，统一 loading/error/forbidden/ready -->
+    <main class="workspace-content">
+      <AsyncState
+        :state="asyncState"
+        :message="errorMessage"
+        @retry="reloadAll"
+      >
+        <router-view />
+      </AsyncState>
     </main>
   </div>
 </template>
@@ -217,108 +323,67 @@ provide('workspaceReload', loadProject)
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: #f7f8fa;
+  background: var(--ui-bg-app, #f4f6f8);
 }
 
 .workspace-header {
-  background: #fff;
-  border-bottom: 1px solid #e6e8eb;
-  padding: 16px 24px 0;
+  background: var(--ui-bg-surface, #fff);
+  border-bottom: 1px solid var(--ui-border, #d9dee5);
+  padding: var(--ui-space-4, 16px) var(--ui-space-6, 24px) var(--ui-space-3, 12px);
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-3, 12px);
 }
 
-.header-top {
+.workspace-context-bar {
   display: flex;
   align-items: center;
-  gap: 12px;
-}
-
-.back-link {
-  font-size: 13px;
-  color: #909399;
-}
-
-.project-title {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 600;
-  color: #303133;
-}
-
-.header-meta {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-top: 10px;
-  font-size: 13px;
-  color: #606266;
+  justify-content: space-between;
+  gap: var(--ui-space-3, 12px);
   flex-wrap: wrap;
 }
 
-.meta-item {
-  color: #606266;
-}
-
-.completion {
-  font-weight: 600;
-  color: #303133;
-}
-
-.header-body {
+.workspace-context-bar__group {
   display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  margin-top: 16px;
+  align-items: center;
+  gap: var(--ui-space-6, 24px);
+  flex-wrap: wrap;
 }
 
-.stage-nav {
-  display: flex;
-  gap: 4px;
+.workspace-context-bar__item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--ui-space-1, 4px);
+  font-size: var(--ui-font-size-sm, 14px);
 }
 
-.stage-nav-item {
-  appearance: none;
-  background: transparent;
-  border: none;
-  border-bottom: 2px solid transparent;
-  padding: 8px 16px;
-  font-size: 14px;
-  color: #606266;
-  cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+.workspace-context-bar__k {
+  color: var(--ui-text-muted, #7b8794);
+  font-size: var(--ui-font-size-xs, 12px);
 }
 
-.stage-nav-item:hover:not(:disabled) {
-  color: #303133;
-}
-
-.stage-nav-item.active {
-  color: #303133;
-  border-bottom-color: #303133;
+.workspace-context-bar__v {
+  color: var(--ui-text-primary, #1f2933);
   font-weight: 500;
 }
 
-.stage-nav-item:disabled {
-  color: #c0c4cc;
-  cursor: not-allowed;
+.workspace-context-bar__archived {
+  font-size: var(--ui-font-size-xs, 12px);
+  padding: 2px var(--ui-space-2, 8px);
+  border-radius: var(--ui-radius-sm, 4px);
+  background: var(--ui-bg-subtle, #f8f9fb);
+  color: var(--ui-text-muted, #7b8794);
+  border: 1px solid var(--ui-border, #d9dee5);
 }
 
-.header-actions {
-  padding-bottom: 6px;
-}
-
-.header-error {
-  margin-top: 12px;
-  padding: 8px 12px;
-  background: #fef0f0;
-  color: #f56c6c;
-  font-size: 13px;
-  border-radius: 4px;
+.workspace-stepper {
+  overflow-x: auto;
 }
 
 .workspace-content {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 24px;
+  padding: var(--ui-space-6, 24px);
 }
 </style>
