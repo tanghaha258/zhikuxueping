@@ -1,19 +1,55 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Upload, Delete, Document, VideoCamera, Picture, Link } from '@element-plus/icons-vue'
+import { Search, Upload, Delete, Document, VideoCamera, Picture, Link, Connection } from '@element-plus/icons-vue'
 import { listResourcesApi, createResourceApi, deleteResourceApi } from '@/api/resources'
 import { listProjectsApi } from '@/api/projects'
 import { uploadFileApi } from '@/api/upload'
+import { linkContextApi, listContextLinksByArtifactApi, type ContextLink } from '@/features/tool-context/api'
+import { validateToolContext, type ProjectPhase, type ToolContext } from '@/features/tool-context/types'
 import type { Resource, Project } from '@/types'
 import { formatDate } from '@/utils/format'
 
 const resources = ref<Resource[]>([])
 const projects = ref<Project[]>([])
 const loading = ref(false)
-const selectedProjectId = ref('')
 const activeType = ref('all')
 const searchKeyword = ref('')
+
+// ── Task 8：工具上下文（独立 / 关联项目）─────────────────────────
+// 独立工具页默认 independent；教师可切换为 project 模式查看项目资源并上传带项目的资源。
+// 独立资源可通过"加入项目"操作建立一条 resource 引用，不复制资产本体。
+const context = ref<ToolContext>({ mode: 'independent' })
+const joinDialog = ref(false)
+const joinTarget = ref<Resource | null>(null)
+const joinProjectId = ref('')
+const joinPhase = ref<ProjectPhase>('preparation')
+const joining = ref(false)
+
+const isProjectMode = computed(() => context.value.mode === 'project')
+const contextValidation = computed(() => validateToolContext(context.value))
+/** 列表筛选与上传关联都跟随当前上下文模式。 */
+const selectedProjectId = computed(() =>
+  isProjectMode.value && contextValidation.value.valid
+    ? (context.value as Extract<ToolContext, { mode: 'project' }>).projectId
+    : '',
+)
+
+function switchMode(mode: 'independent' | 'project') {
+  if (mode === 'independent') {
+    context.value = { mode: 'independent' }
+  } else {
+    context.value = { mode: 'project', projectId: '', phase: 'preparation' }
+  }
+  fetchResources()
+}
+
+function onProjectChange(projectId: string) {
+  if (context.value.mode === 'project') {
+    context.value = { ...context.value, projectId }
+    fetchResources()
+  }
+}
 
 const uploadDialog = ref(false)
 const uploadRef = ref()
@@ -188,6 +224,36 @@ async function handleDelete(id: string) {
   }
 }
 
+// ── Task 8：独立资源加入项目（只建引用，不复制资产）──────────────
+function openJoinDialog(resource: Resource) {
+  joinTarget.value = resource
+  joinProjectId.value = ''
+  joinPhase.value = 'preparation'
+  joinDialog.value = true
+}
+
+async function confirmJoin() {
+  if (!joinTarget.value) return
+  if (!joinProjectId.value) {
+    ElMessage.warning('请选择要加入的项目')
+    return
+  }
+  joining.value = true
+  try {
+    await linkContextApi('resource', joinTarget.value.id, {
+      mode: 'project',
+      projectId: joinProjectId.value,
+      phase: joinPhase.value,
+    })
+    ElMessage.success('资源已加入项目，资产本体保留')
+    joinDialog.value = false
+  } catch {
+    ElMessage.error('加入项目失败，请确认是否有该项目权限')
+  } finally {
+    joining.value = false
+  }
+}
+
 onMounted(() => {
   fetchProjects()
   fetchResources()
@@ -203,16 +269,29 @@ onMounted(() => {
       </el-button>
     </div>
 
+    <!-- Task 8：上下文选择条。独立模式列出独立资源；项目模式锁定到指定项目。 -->
+    <div class="context-bar" data-ui="resource-context-bar">
+      <el-radio-group :model-value="context.mode" @change="switchMode">
+        <el-radio-button value="independent">独立资源</el-radio-button>
+        <el-radio-button value="project">关联项目</el-radio-button>
+      </el-radio-group>
+      <template v-if="isProjectMode">
+        <el-select
+          :model-value="(context as any).projectId"
+          placeholder="选择项目"
+          style="width: 220px"
+          @change="onProjectChange"
+        >
+          <el-option v-for="p in projects" :key="p.id" :label="p.title" :value="p.id" />
+        </el-select>
+        <span v-if="!contextValidation.valid" class="context-bar__error">
+          {{ contextValidation.error }}
+        </span>
+      </template>
+      <span v-else class="context-bar__hint">独立资源不归属项目，可稍后加入项目</span>
+    </div>
+
     <div class="search-bar">
-      <el-select
-        v-model="selectedProjectId"
-        placeholder="选择项目"
-        clearable
-        style="width: 260px"
-        @change="fetchResources"
-      >
-        <el-option v-for="p in projects" :key="p.id" :label="p.title" :value="p.id" />
-      </el-select>
       <el-input
         v-model="searchKeyword"
         placeholder="搜索资源名称..."
@@ -270,8 +349,16 @@ onMounted(() => {
             {{ formatSize(row.fileSize) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="100" fixed="right">
+        <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
+            <el-button
+              v-if="!isProjectMode"
+              text
+              type="primary"
+              size="small"
+              :icon="Connection"
+              @click="openJoinDialog(row)"
+            >加入项目</el-button>
             <el-button text type="danger" size="small" :icon="Delete" @click="handleDelete(row.id)">
               删除
             </el-button>
@@ -328,5 +415,101 @@ onMounted(() => {
         <el-button type="primary" @click="handleUpload" :loading="uploading">确认上传</el-button>
       </template>
     </el-dialog>
+
+    <!-- Task 8：独立资源加入项目（只建引用，不复制资产/文件） -->
+    <el-dialog
+      v-model="joinDialog"
+      title="加入项目"
+      width="460px"
+      :close-on-click-modal="false"
+    >
+      <p class="join-tip" v-if="joinTarget">
+        将资源「{{ joinTarget.title }}」加入项目，仅建立引用，资产本体与文件保留。
+      </p>
+      <el-form label-position="top">
+        <el-form-item label="目标项目">
+          <el-select v-model="joinProjectId" placeholder="选择项目" style="width: 100%">
+            <el-option v-for="p in projects" :key="p.id" :label="p.title" :value="p.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="项目阶段">
+          <el-select v-model="joinPhase" style="width: 100%">
+            <el-option label="诊断" value="diagnosis" />
+            <el-option label="设计" value="design" />
+            <el-option label="备课" value="preparation" />
+            <el-option label="实施" value="implementation" />
+            <el-option label="评价" value="evaluation" />
+            <el-option label="改进" value="improvement" />
+            <el-option label="结项" value="closure" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="joinDialog = false" :disabled="joining">取消</el-button>
+        <el-button type="primary" @click="confirmJoin" :loading="joining">确认加入</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.page-container {
+  padding: 8px;
+}
+
+.page-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: #303133;
+  margin: 0;
+}
+
+.flex-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.context-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: #f5f7fa;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+}
+
+.context-bar__error {
+  color: #f56c6c;
+  font-size: 12px;
+}
+
+.context-bar__hint {
+  color: #909399;
+  font-size: 12px;
+}
+
+.search-bar {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.empty-state {
+  padding: 40px 0;
+}
+
+.join-tip {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  background: #f5f7fa;
+  border-radius: 4px;
+  color: #606266;
+  font-size: 13px;
+  line-height: 1.5;
+}
+</style>
