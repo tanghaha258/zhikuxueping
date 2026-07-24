@@ -1,313 +1,243 @@
 <script setup lang="ts">
 /**
- * ProjectOverviewView - 项目总览（计划 3.5.1）。
+ * ProjectOverviewView - 项目总览（Task 5 重写）。
  *
- * 展示真实问题与成果摘要、学科贡献摘要、资源/任务进度、证据与评价进度、
- * AI 待审核数与阻断问题、下一步建议。
- *
- * 原则：所有数字来自接口；缺失项如实显示"未配置/未采集"，
- * 不按零分伪装为已完成（计划 3.5.1 验收）。
+ * 设计要点（计划 Task 5 Step 3 / 规格 §5.2）：
+ * - 固定显示：阶段进度、唯一下一步、学生参与、未发布评价、AI待确认、阻断清单和真实时间线。
+ * - 所有数字来自 project-context store 的 counts（真实计数），不伪造。
+ * - 删除"后续Task实现"类页面文案；缺失项如实显示。
+ * - 复用 shared UI 基座（MetricStrip、InlineAlert、StatusBadge），不重复造样式。
  */
-import { computed, inject, onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getDesignSnapshotApi } from '@/features/project-workspace/api'
-import { listResourcesApi } from '@/api/resources'
-import { listTasksApi } from '@/api/tasks'
-import type { Project, Task, Resource } from '@/types'
+import { useProjectContextStore } from '@/features/project-context/store'
 import type {
-  ProjectDesignSnapshot,
-  ProjectValidationResult,
-} from '@/features/project-workspace/types'
-import type { SubjectItem } from '@/types'
+  PhaseKey,
+  ProjectWorkspacePhase,
+  ProjectWorkspaceTimelineEvent,
+} from '@/features/project-context/types'
+import MetricStrip from '@/shared/ui/MetricStrip.vue'
+import InlineAlert from '@/shared/ui/InlineAlert.vue'
+import StatusBadge from '@/shared/ui/StatusBadge.vue'
 import { formatDate } from '@/utils/format'
 
 const route = useRoute()
 const router = useRouter()
+const store = useProjectContextStore()
 const projectId = computed(() => route.params.id as string)
 
-const project = inject<import('vue').Ref<Project | null>>('workspaceProject')
-const validation = inject<import('vue').Ref<ProjectValidationResult | null>>(
-  'workspaceValidation',
-)
-const subjects = inject<import('vue').Ref<SubjectItem[]>>('workspaceSubjects')
+const timeline = ref<ProjectWorkspaceTimelineEvent[]>([])
+const timelineLoading = ref(false)
+const timelineError = ref<string>('')
 
-const snapshot = ref<ProjectDesignSnapshot | null>(null)
-const resources = ref<Resource[]>([])
-const tasks = ref<Task[]>([])
-const loading = ref(false)
-const error = ref<string | null>(null)
+// ── 阶段标签（与后端 PHASE_ORDER 单一来源一致）──────────────────
+const PHASE_LABELS: Record<PhaseKey, string> = {
+  diagnosis: '学情诊断',
+  design: '跨学科设计',
+  preparation: '备课与准备',
+  implementation: '教学实施',
+  evaluation: '评价与反馈',
+  improvement: '改进与再评价',
+  closure: '结项',
+}
 
-const problem = computed(() => snapshot.value?.problem ?? null)
-const contributions = computed(() => snapshot.value?.contributions ?? [])
-const goals = computed(() => snapshot.value?.goals ?? [])
-const indicators = computed(() => snapshot.value?.indicators ?? [])
-const evidencePlans = computed(() => snapshot.value?.evidencePlans ?? [])
+const PHASE_ROUTE: Record<PhaseKey, string> = {
+  diagnosis: 'diagnosis',
+  design: 'design',
+  preparation: 'preparation',
+  implementation: 'tasks',
+  evaluation: 'evaluation',
+  improvement: 'insights',
+  closure: 'closure',
+}
 
-const coreContribution = computed(() =>
-  contributions.value.find((c) => c.role === 'core'),
-)
-const supportContributions = computed(() =>
-  contributions.value.filter((c) => c.role === 'support'),
-)
+// ── 派生状态 ───────────────────────────────────────────────────
+const context = computed(() => store.currentContext)
+const phases = computed<ProjectWorkspacePhase[]>(() => context.value?.phases ?? [])
+const blockers = computed(() => context.value?.blockers ?? [])
+const warnings = computed(() => context.value?.warnings ?? [])
+const counts = computed(() => context.value?.counts ?? null)
+const nextAction = computed(() => context.value?.nextAction ?? null)
+const archived = computed(() => store.isArchived)
 
-const subjectName = (id?: string | null) =>
-  (id && subjects?.value?.find((s) => s.id === id)?.name) || '未指定'
-
-const completionPct = computed(() =>
-  Math.round((validation?.value?.completion ?? 0) * 100),
-)
-
-const blockers = computed(() => validation?.value?.blockers ?? [])
-const warnings = computed(() => validation?.value?.warnings ?? [])
-
-// 证据计划按阶段分组
-const evidenceByStage = computed(() => {
-  const groups: Record<string, number> = {
-    pre_class: 0,
-    in_class: 0,
-    post_class: 0,
-  }
-  for (const p of evidencePlans.value) {
-    if (groups[p.stage] !== undefined) groups[p.stage]++
-  }
-  return groups
+const completionPct = computed(() => {
+  const total = phases.value.length
+  if (total === 0) return 0
+  const done = phases.value.filter((p) => p.status === 'completed').length
+  return Math.round((done / total) * 100)
 })
 
-// 现有任务按状态分组（未分层，仅展示已有进度）
-const taskByStatus = computed(() => {
-  const groups: Record<string, number> = {}
-  for (const t of tasks.value) {
-    groups[t.status] = (groups[t.status] || 0) + 1
-  }
-  return groups
+type MetricTone = 'default' | 'primary' | 'success' | 'warning' | 'danger'
+
+const metrics = computed(() => {
+  const c = counts.value
+  const unpublished = c?.unpublishedEvaluations ?? 0
+  const pendingAi = c?.pendingAiReviews ?? 0
+  return [
+    { label: '学生', value: c?.students ?? 0 },
+    { label: '任务', value: c?.tasks ?? 0 },
+    { label: '已发布', value: c?.publishedTasks ?? 0 },
+    { label: '提交', value: c?.submissions ?? 0 },
+    {
+      label: '未发布评价',
+      value: unpublished,
+      tone: (unpublished > 0 ? 'warning' : 'default') as MetricTone,
+    },
+    {
+      label: 'AI 待确认',
+      value: pendingAi,
+      tone: (pendingAi > 0 ? 'warning' : 'default') as MetricTone,
+    },
+  ]
 })
 
-async function loadOverview() {
-  loading.value = true
-  error.value = null
+function gotoPhase(phase: PhaseKey) {
+  if (archived.value) return
+  router.push(`/teacher/projects/${projectId.value}/${PHASE_ROUTE[phase]}`)
+}
+
+function gotoNextAction() {
+  const action = nextAction.value
+  if (!action || !action.route || archived.value) return
+  router.push(action.route)
+}
+
+async function loadTimeline() {
+  if (!projectId.value) return
+  timelineLoading.value = true
+  timelineError.value = ''
   try {
-    const [snapRes, resRes, taskRes] = await Promise.all([
-      getDesignSnapshotApi(projectId.value),
-      listResourcesApi({ project_id: projectId.value }).catch(() => ({
-        data: { data: [] as Resource[] },
-      })),
-      listTasksApi({ project_id: projectId.value }).catch(() => ({
-        data: { data: { items: [] as Task[] } },
-      })),
-    ])
-    snapshot.value = snapRes.data.data
-    resources.value = (resRes.data.data as Resource[]) || []
-    tasks.value = ((taskRes.data.data as { items?: Task[] })?.items) || []
+    await store.loadTimeline(projectId.value)
+    timeline.value = store.timeline
   } catch (e) {
-    error.value = (e as Error).message
+    timelineError.value = (e as Error)?.message || '时间线加载失败'
   } finally {
-    loading.value = false
+    timelineLoading.value = false
   }
 }
 
-function gotoDesign() {
-  router.push({
-    name: 'ProjectDesign',
-    params: { id: projectId.value },
-  })
-}
-
-onMounted(loadOverview)
+onMounted(loadTimeline)
 </script>
 
 <template>
-  <div class="overview" v-loading="loading">
-    <div v-if="error" class="error-bar">
-      加载失败：{{ error }}
-      <el-button text type="primary" @click="loadOverview">重试</el-button>
-    </div>
+  <div class="overview" data-ui="project-overview">
+    <!-- 指标条：学生参与、任务、提交、未发布评价、AI待确认 -->
+    <MetricStrip :metrics="metrics" />
 
-    <!-- 完整度与下一步 -->
-    <section class="panel">
-      <div class="panel-head">
-        <h3 class="panel-title">项目完整度</h3>
+    <!-- 完成度与下一步 -->
+    <section class="overview-block" data-ui="overview-completion">
+      <div class="block-head">
+        <h3 class="block-title">项目完成度</h3>
         <span class="completion-text">{{ completionPct }}%</span>
       </div>
-      <el-progress
-        :percentage="completionPct"
-        :stroke-width="10"
-        :show-text="false"
-        color="#5a6"
-      />
-      <p class="panel-hint">
-        完整度 = (7 - 阻断项数) / 7，依据核心学科、支撑学科、真实问题、目标-指标-证据链等 7 项检查。
+      <div class="completion-bar" role="progressbar" :aria-valuenow="completionPct" aria-valuemin="0" aria-valuemax="100">
+        <div class="completion-bar__fill" :style="{ width: `${completionPct}%` }" />
+      </div>
+      <p class="block-hint">
+        完成度 = 已完成阶段数 / 总阶段数；阻断项需在对应阶段解决后才能继续。
       </p>
     </section>
 
-    <!-- 真实问题与成果摘要 -->
-    <section class="panel">
-      <div class="panel-head">
-        <h3 class="panel-title">真实问题与成果</h3>
-        <el-button text type="primary" @click="gotoDesign">编辑</el-button>
+    <!-- 唯一下一步 -->
+    <section v-if="nextAction && !archived" class="overview-block" data-ui="overview-next-action">
+      <div class="block-head">
+        <h3 class="block-title">下一步</h3>
       </div>
-      <template v-if="problem">
-        <div class="kv"><span class="k">情境</span><span class="v">{{ problem.context || '—' }}</span></div>
-        <div class="kv"><span class="k">对象</span><span class="v">{{ problem.object || '—' }}</span></div>
-        <div class="kv"><span class="k">受众</span><span class="v">{{ problem.audience || '—' }}</span></div>
-        <div class="kv"><span class="k">约束</span><span class="v">{{ problem.constraints || '—' }}</span></div>
-        <div class="kv"><span class="k">最终成果</span><span class="v">{{ problem.deliverable || '—' }}</span></div>
-        <div class="kv"><span class="k">成果用途</span><span class="v">{{ problem.usage || '—' }}</span></div>
-      </template>
-      <el-empty v-else description="尚未填写真实问题" :image-size="60" />
+      <button
+        v-if="nextAction.route"
+        type="button"
+        class="next-action-card ui-clickable"
+        data-ui="next-action-button"
+        @click="gotoNextAction"
+      >
+        <span class="next-action-label">{{ nextAction.label }}</span>
+        <span v-if="nextAction.reason" class="next-action-reason">{{ nextAction.reason }}</span>
+        <span class="next-action-arrow" aria-hidden="true">→</span>
+      </button>
+      <div v-else class="next-action-card next-action-card--readonly">
+        <span class="next-action-label">{{ nextAction.label }}</span>
+        <span v-if="nextAction.reason" class="next-action-reason">{{ nextAction.reason }}</span>
+      </div>
     </section>
 
-    <!-- 学科贡献摘要 -->
-    <section class="panel">
-      <div class="panel-head">
-        <h3 class="panel-title">学科贡献</h3>
-        <el-button text type="primary" @click="gotoDesign">编辑</el-button>
+    <!-- 阶段进度 -->
+    <section class="overview-block" data-ui="overview-phases">
+      <div class="block-head">
+        <h3 class="block-title">阶段进度</h3>
       </div>
-      <div v-if="contributions.length === 0" class="empty-row">尚未配置学科贡献</div>
-      <table v-else class="contribution-table">
-        <thead>
-          <tr>
-            <th>角色</th>
-            <th>学科</th>
-            <th>知识</th>
-            <th>思维</th>
-            <th>探究</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="c in contributions" :key="c.id">
-            <td>
-              <el-tag size="small" :type="c.role === 'core' ? 'primary' : 'info'">
-                {{ c.role === 'core' ? '核心' : '支撑' }}
-              </el-tag>
-            </td>
-            <td>{{ subjectName(c.subjectId) }}</td>
-            <td>{{ c.knowledge || '—' }}</td>
-            <td>{{ c.thinking || '—' }}</td>
-            <td>{{ c.inquiry || '—' }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <div v-if="!coreContribution" class="risk-row">⚠ 缺少核心学科</div>
-      <div v-if="supportContributions.length === 0" class="risk-row">⚠ 缺少支撑学科</div>
-    </section>
-
-    <!-- 三级资源覆盖情况 -->
-    <section class="panel">
-      <div class="panel-head">
-        <h3 class="panel-title">资源覆盖</h3>
-      </div>
-      <div class="stat-row">
-        <div class="stat">
-          <span class="stat-num">{{ resources.length }}</span>
-          <span class="stat-label">现有资源（未分层）</span>
-        </div>
-        <div class="stat">
-          <span class="stat-num muted">—</span>
-          <span class="stat-label">基础层</span>
-        </div>
-        <div class="stat">
-          <span class="stat-num muted">—</span>
-          <span class="stat-label">提升层</span>
-        </div>
-        <div class="stat">
-          <span class="stat-num muted">—</span>
-          <span class="stat-label">拓展层</span>
-        </div>
-      </div>
-      <p class="panel-hint">资源分层与递进检查将在 Task 3 实现。</p>
-    </section>
-
-    <!-- 三阶段任务进度 -->
-    <section class="panel">
-      <div class="panel-head">
-        <h3 class="panel-title">任务进度</h3>
-      </div>
-      <div class="stat-row">
-        <div class="stat">
-          <span class="stat-num">{{ tasks.length }}</span>
-          <span class="stat-label">现有任务（未分阶段）</span>
-        </div>
-        <div class="stat">
-          <span class="stat-num muted">—</span>
-          <span class="stat-label">课前</span>
-        </div>
-        <div class="stat">
-          <span class="stat-num muted">—</span>
-          <span class="stat-label">课中</span>
-        </div>
-        <div class="stat">
-          <span class="stat-num muted">—</span>
-          <span class="stat-label">课后</span>
-        </div>
-      </div>
-      <div v-if="tasks.length > 0" class="task-status-row">
-        <span class="task-status-label">按状态：</span>
-        <span v-for="(cnt, st) in taskByStatus" :key="st" class="task-status-chip">
-          {{ st }}：{{ cnt }}
-        </span>
-      </div>
-      <p class="panel-hint">任务三阶段划分将在 Task 3 实现。</p>
-    </section>
-
-    <!-- 证据采集与评价进度 -->
-    <section class="panel">
-      <div class="panel-head">
-        <h3 class="panel-title">证据与评价</h3>
-      </div>
-      <div class="stat-row">
-        <div class="stat">
-          <span class="stat-num">{{ goals.length }}</span>
-          <span class="stat-label">学习目标</span>
-        </div>
-        <div class="stat">
-          <span class="stat-num">{{ indicators.length }}</span>
-          <span class="stat-label">评价指标</span>
-        </div>
-        <div class="stat">
-          <span class="stat-num">{{ evidencePlans.length }}</span>
-          <span class="stat-label">证据计划</span>
-        </div>
-      </div>
-      <div class="evidence-stage-row">
-        <span>课前证据：{{ evidenceByStage.pre_class }}</span>
-        <span>课中证据：{{ evidenceByStage.in_class }}</span>
-        <span>课后证据：{{ evidenceByStage.post_class }}</span>
-      </div>
-      <div v-if="evidencePlans.length === 0" class="risk-row">
-        ⚠ 尚无证据计划，缺失证据将显示"未采集"，不计为零分
+      <div class="phase-list">
+        <button
+          v-for="p in phases"
+          :key="p.phase"
+          type="button"
+          class="phase-row"
+          :data-ui="`phase-${p.phase}`"
+          :disabled="archived"
+          @click="gotoPhase(p.phase)"
+        >
+          <span class="phase-label">{{ PHASE_LABELS[p.phase] ?? p.phase }}</span>
+          <StatusBadge
+            :status="p.status"
+            :mapping="{
+              not_started: { label: '未开始', tone: 'muted' },
+              in_progress: { label: '进行中', tone: 'primary' },
+              completed: { label: '已完成', tone: 'success' },
+              blocked: { label: '阻断', tone: 'danger' },
+            }"
+          />
+          <span v-if="p.completedAt" class="phase-time">{{ formatDate(p.completedAt, 'YYYY-MM-DD') }}</span>
+        </button>
       </div>
     </section>
 
     <!-- 阻断与警告 -->
-    <section class="panel" v-if="blockers.length > 0 || warnings.length > 0">
-      <div class="panel-head">
-        <h3 class="panel-title">问题清单</h3>
+    <section
+      v-if="blockers.length > 0 || warnings.length > 0"
+      class="overview-block"
+      data-ui="overview-issues"
+    >
+      <div class="block-head">
+        <h3 class="block-title">阻断与警告</h3>
       </div>
-      <ul class="issue-list">
-        <li
+      <div class="issue-list">
+        <InlineAlert
           v-for="b in blockers"
           :key="'b-' + b.code"
-          class="issue-item blocker"
-        >
-          <el-tag size="small" type="danger">阻断</el-tag>
-          <span class="issue-field">{{ b.field }}</span>
-          <span class="issue-msg">{{ b.message }}</span>
-        </li>
-        <li
+          tone="blocker"
+          :title="`${b.field}：${b.message}`"
+          :description="b.phase ? `所属阶段：${PHASE_LABELS[b.phase] ?? b.phase}` : ''"
+        />
+        <InlineAlert
           v-for="w in warnings"
           :key="'w-' + w.code"
-          class="issue-item warning"
-        >
-          <el-tag size="small" type="warning">警告</el-tag>
-          <span class="issue-field">{{ w.field }}</span>
-          <span class="issue-msg">{{ w.message }}</span>
-        </li>
-      </ul>
+          tone="warning"
+          :title="`${w.field}：${w.message}`"
+          :description="w.phase ? `所属阶段：${PHASE_LABELS[w.phase] ?? w.phase}` : ''"
+        />
+      </div>
     </section>
 
-    <p v-if="project?.createdAt" class="footer-meta">
-      项目创建于 {{ formatDate(project.createdAt, 'YYYY-MM-DD HH:mm') }}
-    </p>
+    <!-- 真实时间线 -->
+    <section class="overview-block" data-ui="overview-timeline">
+      <div class="block-head">
+        <h3 class="block-title">项目时间线</h3>
+      </div>
+      <p v-if="timelineLoading" class="block-hint">加载中…</p>
+      <p v-else-if="timelineError" class="block-hint block-hint--error">{{ timelineError }}</p>
+      <p v-else-if="timeline.length === 0" class="block-hint">暂无时间线事件</p>
+      <ol v-else class="timeline-list">
+        <li
+          v-for="(evt, idx) in timeline"
+          :key="idx"
+          class="timeline-item"
+          :data-ui="`timeline-${evt.type}`"
+        >
+          <span class="timeline-time">{{ formatDate(evt.timestamp, 'YYYY-MM-DD HH:mm') }}</span>
+          <span class="timeline-label">{{ evt.label }}</span>
+          <span v-if="evt.actor" class="timeline-actor">{{ evt.actor }}</span>
+        </li>
+      </ol>
+    </section>
   </div>
 </template>
 
@@ -315,173 +245,190 @@ onMounted(loadOverview)
 .overview {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--ui-space-4, 16px);
   max-width: 1080px;
 }
 
-.error-bar {
-  padding: 8px 12px;
-  background: #fef0f0;
-  color: #f56c6c;
-  font-size: 13px;
-  border-radius: 4px;
+.overview-block {
+  background: var(--ui-bg-surface, #fff);
+  border: 1px solid var(--ui-border-light, #e4e7eb);
+  border-radius: var(--ui-radius-md, 6px);
+  padding: var(--ui-space-3, 12px) var(--ui-space-4, 16px);
 }
 
-.panel {
-  background: #fff;
-  border: 1px solid #ebeef5;
-  border-radius: 6px;
-  padding: 16px 20px;
-}
-
-.panel-head {
+.block-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: var(--ui-space-2, 8px);
 }
 
-.panel-title {
+.block-title {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--ui-font-size-sm, 14px);
   font-weight: 600;
-  color: #303133;
+  color: var(--ui-text-primary, #1f2933);
 }
 
+.block-hint {
+  margin: var(--ui-space-2, 8px) 0 0;
+  font-size: var(--ui-font-size-xs, 12px);
+  color: var(--ui-text-muted, #7b8794);
+}
+
+.block-hint--error {
+  color: var(--ui-danger, #c53030);
+}
+
+/* ── 完成度条 ──────────────────────────────────────────────── */
 .completion-text {
-  font-size: 20px;
+  font-size: var(--ui-font-size-lg, 18px);
   font-weight: 600;
-  color: #303133;
+  color: var(--ui-text-primary, #1f2933);
 }
 
-.panel-hint {
-  margin: 8px 0 0;
-  font-size: 12px;
-  color: #909399;
-}
-
-.kv {
-  display: grid;
-  grid-template-columns: 80px 1fr;
-  gap: 8px;
-  padding: 4px 0;
-  font-size: 13px;
-}
-
-.kv .k {
-  color: #909399;
-}
-
-.kv .v {
-  color: #303133;
-  word-break: break-word;
-}
-
-.contribution-table {
+.completion-bar {
   width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
+  height: 8px;
+  background: var(--ui-bg-subtle, #f4f6f8);
+  border-radius: var(--ui-radius-sm, 4px);
+  overflow: hidden;
 }
 
-.contribution-table th,
-.contribution-table td {
-  border: 1px solid #ebeef5;
-  padding: 8px 10px;
-  text-align: left;
+.completion-bar__fill {
+  height: 100%;
+  background: var(--ui-success, #38a169);
+  transition: width 0.2s ease;
 }
 
-.contribution-table th {
-  background: #fafbfc;
-  color: #606266;
-  font-weight: 500;
-}
-
-.empty-row,
-.risk-row {
-  font-size: 13px;
-  color: #909399;
-  padding: 6px 0;
-}
-
-.risk-row {
-  color: #e6a23c;
-}
-
-.stat-row {
+/* ── 下一步卡片 ────────────────────────────────────────────── */
+.next-action-card {
   display: flex;
-  gap: 24px;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-3, 12px);
+  width: 100%;
+  text-align: left;
+  background: var(--ui-bg-subtle, #f8f9fb);
+  border: 1px solid var(--ui-border-light, #e4e7eb);
+  border-radius: var(--ui-radius-md, 6px);
+  padding: var(--ui-space-3, 12px) var(--ui-space-4, 16px);
+  cursor: pointer;
+  font: inherit;
+  color: var(--ui-text-primary, #1f2933);
 }
 
-.stat {
+.next-action-card:hover {
+  border-color: var(--ui-primary, #2c6cf6);
+}
+
+.next-action-card--readonly {
+  cursor: default;
+}
+
+.next-action-label {
+  flex: 1 1 auto;
+  font-size: var(--ui-font-size-sm, 14px);
+  font-weight: 600;
+}
+
+.next-action-reason {
+  font-size: var(--ui-font-size-xs, 12px);
+  color: var(--ui-text-muted, #7b8794);
+}
+
+.next-action-arrow {
+  color: var(--ui-primary, #2c6cf6);
+  font-weight: 600;
+}
+
+/* ── 阶段列表 ──────────────────────────────────────────────── */
+.phase-list {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
 }
 
-.stat-num {
-  font-size: 22px;
-  font-weight: 600;
-  color: #303133;
-}
-
-.stat-num.muted {
-  color: #c0c4cc;
-}
-
-.stat-label {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 2px;
-}
-
-.task-status-row {
-  margin-top: 10px;
-  font-size: 12px;
-  color: #606266;
-}
-
-.task-status-chip {
-  margin-left: 8px;
-  padding: 2px 8px;
-  background: #f4f4f5;
-  border-radius: 10px;
-}
-
-.evidence-stage-row {
-  margin-top: 10px;
+.phase-row {
   display: flex;
-  gap: 16px;
-  font-size: 12px;
-  color: #606266;
+  align-items: center;
+  gap: var(--ui-space-3, 12px);
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--ui-border-light, #f0f2f5);
+  padding: var(--ui-space-2, 8px) 0;
+  cursor: pointer;
+  font: inherit;
+  color: var(--ui-text-primary, #1f2933);
 }
 
+.phase-row:last-child {
+  border-bottom: none;
+}
+
+.phase-row:hover:not(:disabled) {
+  background: var(--ui-bg-subtle, #f8f9fb);
+}
+
+.phase-row:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.phase-label {
+  flex: 1 1 auto;
+  font-size: var(--ui-font-size-sm, 14px);
+}
+
+.phase-time {
+  font-size: var(--ui-font-size-xs, 12px);
+  color: var(--ui-text-muted, #7b8794);
+  white-space: nowrap;
+}
+
+/* ── 阻断与警告 ────────────────────────────────────────────── */
 .issue-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-2, 8px);
+}
+
+/* ── 时间线 ────────────────────────────────────────────────── */
+.timeline-list {
   list-style: none;
   margin: 0;
   padding: 0;
+  display: flex;
+  flex-direction: column;
 }
 
-.issue-item {
+.timeline-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 0;
-  font-size: 13px;
+  gap: var(--ui-space-3, 12px);
+  padding: var(--ui-space-2, 8px) 0;
+  border-bottom: 1px solid var(--ui-border-light, #f0f2f5);
+  font-size: var(--ui-font-size-sm, 14px);
 }
 
-.issue-field {
-  color: #909399;
-  font-family: monospace;
+.timeline-item:last-child {
+  border-bottom: none;
 }
 
-.issue-msg {
-  color: #303133;
+.timeline-time {
+  font-size: var(--ui-font-size-xs, 12px);
+  color: var(--ui-text-muted, #7b8794);
+  white-space: nowrap;
+  min-width: 120px;
 }
 
-.footer-meta {
-  font-size: 12px;
-  color: #c0c4cc;
-  text-align: right;
+.timeline-label {
+  flex: 1 1 auto;
+  color: var(--ui-text-primary, #1f2933);
+}
+
+.timeline-actor {
+  font-size: var(--ui-font-size-xs, 12px);
+  color: var(--ui-text-muted, #7b8794);
 }
 </style>

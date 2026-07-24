@@ -1,247 +1,366 @@
+<script lang="ts">
+/**
+ * 教师工作台类型与纯函数（Task 5）。
+ *
+ * 纯函数（partitionWorkbench / computeWorkbenchMetrics / itemLabelOf）
+ * 单独导出，便于在不挂载组件的情况下单元测试。
+ * 字段命名使用 camelCase，与前端拦截器转换后的响应一致。
+ */
+
+/** 工作台待办条目（各分区共用结构；按需携带附加字段）。 */
+export interface WorkbenchItem {
+  id: string
+  projectId: string
+  projectTitle?: string
+  route: string
+  title?: string
+  taskTitle?: string
+  message?: string
+  scene?: string
+  status?: string
+  publishStatus?: string
+  reviewStatus?: string
+  submittedAt?: string | null
+  confirmedAt?: string | null
+  deadline?: string | null
+  daysLeft?: number | null
+  createdAt?: string | null
+  studentId?: string
+  /** 计算后的展示标签，由 partitionWorkbench 填充。 */
+  label?: string
+}
+
+/** 活跃项目摘要。 */
+export interface WorkbenchActiveProject {
+  id: string
+  title: string
+  status: string
+  currentPhase?: string | null
+  currentPhaseLabel?: string | null
+  completion?: number
+  route: string
+}
+
+export interface TeacherWorkbenchData {
+  activeProjects: WorkbenchActiveProject[]
+  tasksToPublish: WorkbenchItem[]
+  submissionsToReview: WorkbenchItem[]
+  feedbackToPublish: WorkbenchItem[]
+  aiToReview: WorkbenchItem[]
+  deadlines: WorkbenchItem[]
+  learningAlerts: WorkbenchItem[]
+}
+
+export interface WorkbenchSection {
+  key: string
+  title: string
+  emptyHint: string
+  items: WorkbenchItem[]
+}
+
+/** 各分区的展示标签计算；不伪造内容，缺失时回退到项目名或占位。 */
+export function itemLabelOf(key: keyof TeacherWorkbenchData, item: WorkbenchItem): string {
+  switch (key) {
+    case 'tasksToPublish':
+      return item.title ?? '未命名任务'
+    case 'submissionsToReview':
+      return item.taskTitle ?? '待复核提交'
+    case 'feedbackToPublish':
+      return item.projectTitle ? `${item.projectTitle} · 评价待发布` : '评价待发布'
+    case 'aiToReview':
+      return item.scene ? `${item.scene} · AI 待确认` : 'AI 任务待确认'
+    case 'deadlines':
+      return item.title ?? '临近截止任务'
+    case 'learningAlerts':
+      return item.message ?? '学习预警'
+    default:
+      return item.title ?? item.projectTitle ?? '—'
+  }
+}
+
+/** 将工作台数据映射为紧凑待办分区列表；空数据时各分区 items 为空，不伪造。 */
+export function partitionWorkbench(data: TeacherWorkbenchData): WorkbenchSection[] {
+  const sections: Array<{
+    key: keyof TeacherWorkbenchData
+    title: string
+    emptyHint: string
+  }> = [
+    { key: 'tasksToPublish', title: '待发布任务', emptyHint: '暂无草稿任务待发布' },
+    { key: 'submissionsToReview', title: '待复核提交', emptyHint: '暂无待复核提交' },
+    { key: 'feedbackToPublish', title: '待发布评价', emptyHint: '暂无待发布评价' },
+    { key: 'aiToReview', title: 'AI 待确认', emptyHint: '暂无 AI 待确认' },
+    { key: 'deadlines', title: '临近截止', emptyHint: '近 7 天无截止任务' },
+    { key: 'learningAlerts', title: '学习预警', emptyHint: '暂无学习预警' },
+  ]
+  return sections.map((s) => {
+    const raw = (data[s.key] as unknown as WorkbenchItem[]) ?? []
+    return {
+      key: s.key,
+      title: s.title,
+      emptyHint: s.emptyHint,
+      items: raw.map((it) => ({ ...it, label: itemLabelOf(s.key, it) })),
+    }
+  })
+}
+
+export interface WorkbenchMetric {
+  label: string
+  value: number
+  hint?: string
+}
+
+/** 计算工作台指标条数字；全部来自真实计数，不伪造。 */
+export function computeWorkbenchMetrics(data: TeacherWorkbenchData): WorkbenchMetric[] {
+  return [
+    { label: '活跃项目', value: data.activeProjects.length },
+    { label: '待发布任务', value: data.tasksToPublish.length },
+    { label: '待复核提交', value: data.submissionsToReview.length },
+    { label: '待发布评价', value: data.feedbackToPublish.length },
+    { label: 'AI 待确认', value: data.aiToReview.length },
+    { label: '临近截止', value: data.deadlines.length },
+    { label: '学习预警', value: data.learningAlerts.length },
+  ]
+}
+
+/** 空工作台数据，用于初始化与测试夹具。 */
+export function emptyWorkbenchData(): TeacherWorkbenchData {
+  return {
+    activeProjects: [],
+    tasksToPublish: [],
+    submissionsToReview: [],
+    feedbackToPublish: [],
+    aiToReview: [],
+    deadlines: [],
+    learningAlerts: [],
+  }
+}
+</script>
+
 <script setup lang="ts">
 /**
- * TeacherDashboard - 教师工作台
- * 欢迎区域 + 统计卡片 + 项目列表 + 待办事项
+ * 教师工作台页面（Task 5 重写）。
+ *
+ * 设计要点（计划 Task 5 Step 2 / 规格 §5.1）：
+ * - 紧凑待办分区，不显示静态待办；每项操作直接进入所属项目和阶段。
+ * - 所有数据来自 /dashboard/teacher-workbench 真实接口；失败显示错误与重试。
+ * - 复用 shared UI 基座（PageHeader、AsyncState、MetricStrip），不重复造样式。
  */
-import { ref, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import http from '@/api'
 import { useUserStore } from '@/stores/user'
-import { listProjectsApi } from '@/api/projects'
-import { getTaskStatsApi } from '@/api/tasks'
+import PageHeader from '@/shared/ui/PageHeader.vue'
+import AsyncState from '@/shared/ui/AsyncState.vue'
+import MetricStrip from '@/shared/ui/MetricStrip.vue'
+import type { ApiResponse } from '@/types'
 
+const router = useRouter()
 const userStore = useUserStore()
 
-const stats = ref([
-  { title: '进行中的项目', value: 0, icon: 'FolderOpened', color: '#409EFF' },
-  { title: '待评价任务', value: 0, icon: 'EditPen', color: '#E6A23C' },
-  { title: '资源总数', value: 0, icon: 'Files', color: '#67C23A' },
-  { title: '本周待办', value: 0, icon: 'Clock', color: '#F56C6C' },
-])
+const data = ref<TeacherWorkbenchData | null>(null)
+const loading = ref(false)
+const errorMsg = ref<string>('')
 
-const recentProjects = ref<any[]>([])
-const todos = ref([
-  { task: '评价学生"水资源保护"项目报告', time: '今日截止', priority: 'urgent' as const },
-  { task: '审阅第3小组的跨学科项目方案', time: '明天截止', priority: 'normal' as const },
-  { task: '完善智能备课"光合作用"教案', time: '3天后截止', priority: 'normal' as const },
-])
+const sections = computed<WorkbenchSection[]>(() =>
+  data.value ? partitionWorkbench(data.value) : [],
+)
+const metrics = computed<WorkbenchMetric[]>(() =>
+  data.value ? computeWorkbenchMetrics(data.value) : [],
+)
+const activeProjects = computed(() => data.value?.activeProjects ?? [])
 
-onMounted(async () => {
-  try {
-    const res = await listProjectsApi({})
-    const projects = res.data.data.items || []
-    const active = projects.filter((p) => p.status === 'active')
-    recentProjects.value = active.slice(0, 3).map((p) => ({
-      name: p.title,
-      subject: p.subjectIds?.join('·') || '',
-      status: '进行中',
-      deadline: p.endDate || '',
-    }))
-  } catch {
-    /* recentProjects stays empty */
-  }
-
-  try {
-    const res = await getTaskStatsApi()
-    const s = res.data.data
-    stats.value[0].value = s.activeProjects ?? 0
-    stats.value[1].value = s.pendingEvaluation ?? 0
-    stats.value[2].value = s.totalResources ?? 0
-    stats.value[3].value = s.upcomingDeadlines ?? 0
-  } catch {
-    stats.value[1].value = 0
-    stats.value[2].value = 0
-    stats.value[3].value = 0
-  }
+const asyncState = computed<'loading' | 'ready' | 'empty' | 'error' | 'forbidden'>(() => {
+  if (loading.value && !data.value) return 'loading'
+  if (errorMsg.value && !data.value) return 'error'
+  if (!data.value) return 'loading'
+  return 'ready'
 })
+
+async function load() {
+  loading.value = true
+  errorMsg.value = ''
+  try {
+    const res = await http.get<ApiResponse<TeacherWorkbenchData>>(
+      '/dashboard/teacher-workbench',
+    )
+    data.value = res.data.data
+  } catch (e) {
+    errorMsg.value = (e as Error)?.message || '加载失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+function goto(route: string | undefined) {
+  if (!route) return
+  router.push(route)
+}
+
+onMounted(load)
 </script>
 
 <template>
-  <div class="page-container">
-    <!-- 欢迎区域 -->
-    <div class="welcome-section">
-      <div class="welcome-text">
-        <h2 class="welcome-title">欢迎回来，{{ userStore.displayName }}老师</h2>
-        <p class="welcome-desc">今天也是充满教学灵感的一天！以下是您的工作概览。</p>
+  <div class="teacher-workbench" data-ui="teacher-workbench">
+    <PageHeader
+      :title="`欢迎回来，${userStore.displayName}老师`"
+      subtitle="以下是您可管理范围的真实待办与活跃项目"
+    />
+
+    <AsyncState :state="asyncState" :message="errorMsg" @retry="load">
+      <div class="workbench-body">
+        <MetricStrip :metrics="metrics" />
+
+        <!-- 活跃项目 -->
+        <section class="workbench-block" data-ui="active-projects">
+          <div class="block-head">
+            <h3 class="block-title">活跃项目</h3>
+            <span class="block-count">{{ activeProjects.length }}</span>
+          </div>
+          <div v-if="activeProjects.length === 0" class="block-empty">
+            暂无活跃项目
+          </div>
+          <button
+            v-for="p in activeProjects"
+            :key="p.id"
+            type="button"
+            class="workbench-row"
+            data-ui="active-project-item"
+            @click="goto(p.route)"
+          >
+            <span class="row-title">{{ p.title }}</span>
+            <span v-if="p.currentPhaseLabel" class="row-meta">{{ p.currentPhaseLabel }}</span>
+            <span class="row-completion">{{ Math.round((p.completion ?? 0) * 100) }}%</span>
+          </button>
+        </section>
+
+        <!-- 紧凑待办分区 -->
+        <section
+          v-for="section in sections"
+          :key="section.key"
+          class="workbench-block"
+          :data-ui="`section-${section.key}`"
+        >
+          <div class="block-head">
+            <h3 class="block-title">{{ section.title }}</h3>
+            <span class="block-count">{{ section.items.length }}</span>
+          </div>
+          <div v-if="section.items.length === 0" class="block-empty">
+            {{ section.emptyHint }}
+          </div>
+          <button
+            v-for="item in section.items"
+            :key="item.id"
+            type="button"
+            class="workbench-row"
+            :data-ui="`item-${section.key}`"
+            @click="goto(item.route)"
+          >
+            <span class="row-title">{{ item.label }}</span>
+            <span v-if="item.projectTitle" class="row-meta">{{ item.projectTitle }}</span>
+            <span v-if="item.daysLeft !== undefined && item.daysLeft !== null" class="row-deadline">
+              {{ item.daysLeft }} 天后截止
+            </span>
+          </button>
+        </section>
       </div>
-      <el-button type="primary" :icon="Plus">创建新项目</el-button>
-    </div>
-
-    <!-- 统计卡片 -->
-    <div class="stat-cards">
-      <el-card
-        v-for="stat in stats"
-        :key="stat.title"
-        shadow="hover"
-        class="stat-card"
-      >
-        <div class="stat-card-inner">
-          <div class="stat-info">
-            <p class="stat-value">{{ stat.value }}</p>
-            <p class="stat-title">{{ stat.title }}</p>
-          </div>
-          <el-icon :size="40" :color="stat.color">
-            <component :is="stat.icon" />
-          </el-icon>
-        </div>
-      </el-card>
-    </div>
-
-    <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 20px;">
-      <!-- 进行中的项目 -->
-      <el-card shadow="never">
-        <template #header>
-          <div class="flex-between">
-            <span class="card-title">进行中的项目</span>
-            <el-link type="primary" href="#/teacher/projects">查看全部</el-link>
-          </div>
-        </template>
-        <div v-for="(project, idx) in recentProjects" :key="idx" class="project-item">
-          <div class="project-info">
-            <p class="project-name">{{ project.name }}</p>
-            <p class="project-subject">{{ project.subject }}</p>
-          </div>
-          <div class="project-meta">
-            <el-tag :type="project.status === '进行中' ? 'primary' : 'info'" size="small">
-              {{ project.status }}
-            </el-tag>
-            <span class="project-deadline">截止: {{ project.deadline }}</span>
-          </div>
-        </div>
-        <div v-if="recentProjects.length === 0" class="empty-state">
-          <el-empty description="暂无进行中的项目" />
-        </div>
-      </el-card>
-
-      <!-- 待办事项 -->
-      <el-card shadow="never">
-        <template #header>
-          <span class="card-title">待办事项</span>
-        </template>
-        <div v-for="(todo, idx) in todos" :key="idx" class="todo-item">
-          <div class="todo-content">
-            <p class="todo-task">{{ todo.task }}</p>
-            <p class="todo-time" :class="{ urgent: todo.priority === 'urgent' }">
-              {{ todo.time }}
-            </p>
-          </div>
-        </div>
-        <div v-if="todos.length === 0" class="empty-state">
-          <el-empty description="暂无待办事项" />
-        </div>
-      </el-card>
-    </div>
+    </AsyncState>
   </div>
 </template>
 
 <style scoped>
-.welcome-section {
+.teacher-workbench {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-4, 16px);
+  padding: var(--ui-space-4, 16px) var(--ui-space-6, 24px);
+  max-width: 1080px;
+}
+
+.workbench-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-4, 16px);
+}
+
+.workbench-block {
+  background: var(--ui-bg-surface, #fff);
+  border: 1px solid var(--ui-border-light, #e4e7eb);
+  border-radius: var(--ui-radius-md, 6px);
+  padding: var(--ui-space-3, 12px) var(--ui-space-4, 16px);
+}
+
+.block-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 24px;
+  margin-bottom: var(--ui-space-2, 8px);
 }
 
-.welcome-title {
-  font-size: 22px;
+.block-title {
+  margin: 0;
+  font-size: var(--ui-font-size-sm, 14px);
   font-weight: 600;
-  color: #303133;
-  margin: 0;
+  color: var(--ui-text-primary, #1f2933);
 }
 
-.welcome-desc {
-  font-size: 14px;
-  color: #909399;
-  margin: 6px 0 0;
+.block-count {
+  font-size: var(--ui-font-size-xs, 12px);
+  color: var(--ui-text-muted, #7b8794);
+  padding: 2px var(--ui-space-2, 8px);
+  background: var(--ui-bg-subtle, #f4f6f8);
+  border-radius: var(--ui-radius-sm, 4px);
 }
 
-.stat-card {
-  border-radius: 8px;
+.block-empty {
+  font-size: var(--ui-font-size-sm, 14px);
+  color: var(--ui-text-muted, #7b8794);
+  padding: var(--ui-space-2, 8px) 0;
 }
 
-.stat-card-inner {
+.workbench-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: var(--ui-space-3, 12px);
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--ui-border-light, #f0f2f5);
+  padding: var(--ui-space-2, 8px) 0;
+  cursor: pointer;
+  font: inherit;
+  color: var(--ui-text-primary, #1f2933);
 }
 
-.stat-value {
-  font-size: 32px;
-  font-weight: 700;
-  color: #303133;
-  margin: 0;
+.workbench-row:last-child {
+  border-bottom: none;
 }
 
-.stat-title {
-  font-size: 14px;
-  color: #909399;
-  margin: 4px 0 0;
+.workbench-row:hover {
+  background: var(--ui-bg-subtle, #f8f9fb);
 }
 
-.card-title {
-  font-size: 16px;
-  font-weight: 600;
+.row-title {
+  flex: 1 1 auto;
+  font-size: var(--ui-font-size-sm, 14px);
+  min-width: 0;
 }
 
-.project-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 0;
-  border-bottom: 1px solid #f0f0f0;
-
-  &:last-child {
-    border-bottom: none;
-  }
-}
-
-.project-name {
-  font-size: 14px;
-  font-weight: 500;
-  color: #303133;
-  margin: 0 0 4px;
-}
-
-.project-subject {
-  font-size: 12px;
-  color: #909399;
-  margin: 0;
-}
-
-.project-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.project-deadline {
-  font-size: 12px;
-  color: #909399;
+.row-meta {
+  font-size: var(--ui-font-size-xs, 12px);
+  color: var(--ui-text-muted, #7b8794);
   white-space: nowrap;
 }
 
-.todo-item {
-  padding: 12px 0;
-  border-bottom: 1px solid #f0f0f0;
-
-  &:last-child {
-    border-bottom: none;
-  }
+.row-completion {
+  font-size: var(--ui-font-size-xs, 12px);
+  font-weight: 600;
+  color: var(--ui-primary, #2c6cf6);
 }
 
-.todo-task {
-  font-size: 14px;
-  color: #303133;
-  margin: 0 0 4px;
-  line-height: 1.5;
-}
-
-.todo-time {
-  font-size: 12px;
-  color: #909399;
-  margin: 0;
-
-  &.urgent {
-    color: #f56c6c;
-  }
+.row-deadline {
+  font-size: var(--ui-font-size-xs, 12px);
+  color: var(--ui-warning, #d97706);
+  white-space: nowrap;
 }
 </style>
