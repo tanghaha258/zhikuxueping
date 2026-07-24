@@ -75,10 +75,39 @@ const routes: RouteRecordRaw[] = [
             meta: { title: '项目总览' },
           },
           {
+            // 阶段1：学情诊断（Task 4 建立空壳，Task 6 实现业务）
+            path: 'diagnosis',
+            name: 'ProjectDiagnosis',
+            component: () => import('@/views/teacher/project-workspace/ProjectDiagnosisView.vue'),
+            meta: { title: '学情诊断' },
+          },
+          {
+            // 阶段2：跨学科设计
             path: 'design',
             name: 'ProjectDesign',
             component: () => import('@/views/teacher/project-workspace/ProjectDesignView.vue'),
-            meta: { title: '项目设计' },
+            meta: { title: '跨学科设计' },
+          },
+          {
+            // 阶段3：备课与资源（Task 4 建立空壳，Task 8 实现业务）
+            path: 'preparation',
+            name: 'ProjectPreparation',
+            component: () => import('@/views/teacher/project-workspace/ProjectPreparationView.vue'),
+            meta: { title: '备课与资源' },
+          },
+          {
+            // 阶段5：学习证据（Task 4 建立空壳，Task 10 实现业务）
+            path: 'evidence',
+            name: 'ProjectEvidence',
+            component: () => import('@/views/teacher/project-workspace/ProjectEvidenceView.vue'),
+            meta: { title: '学习证据' },
+          },
+          {
+            // 阶段5：评价与反馈（Task 4 建立空壳，Task 11 实现业务）
+            path: 'evaluation',
+            name: 'ProjectEvaluation',
+            component: () => import('@/views/teacher/project-workspace/ProjectEvaluationView.vue'),
+            meta: { title: '评价与反馈' },
           },
           {
             // 三级资源页与递进覆盖检查（计划 Task 3.5）
@@ -130,11 +159,9 @@ const routes: RouteRecordRaw[] = [
             meta: { title: '结项' },
           },
           {
-            // 旧版完整详情（任务/资源/评价 CRUD），保留至 Task 4 拆分为独立子路由
+            // 旧版完整详情已下线：安全重定向到项目总览，不再渲染第二套任务/资源/评价写入口
             path: 'detail',
-            name: 'ProjectDetail',
-            component: () => import('@/views/teacher/ProjectDetailView.vue'),
-            meta: { title: '项目详情（旧版）' },
+            redirect: (to) => ({ name: 'ProjectOverview', params: to.params }),
           },
         ],
       },
