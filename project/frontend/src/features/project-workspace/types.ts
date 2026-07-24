@@ -110,6 +110,8 @@ export interface CompletionIssue {
   code: string
   field: string
   message: string
+  /** 修复路由：前端据此定位到具体编辑区锚点（如 /projects/{id}/design#problem） */
+  fixRoute?: string
 }
 
 export interface ProjectValidationResult {
@@ -120,6 +122,40 @@ export interface ProjectValidationResult {
   completion: number
   details: Record<string, unknown>
 }
+
+// ── 关联删除确认影响（DELETE ...?confirm=true 之前的 409 响应）───
+export interface DeletionImpact {
+  /** 是否需要显式确认 */
+  requiresConfirmation: boolean
+  /** 被下游实体引用的计数（goal/indicator 删除时返回） */
+  referencedBy?: { indicators?: number; evidencePlans?: number }
+  /** 移除核心学科时会清空项目主表 core_subject_id */
+  willClearCoreSubject?: boolean
+}
+
+// ── 设计页五段固定顺序（计划 3.5.2）──────────────────────────────
+export type DesignSectionKey =
+  | 'problem'
+  | 'contributions'
+  | 'goals'
+  | 'indicators'
+  | 'evidence_plans'
+
+export interface DesignSection {
+  key: DesignSectionKey
+  label: string
+  /** fix_route 锚点名，与后端 _fix_route(project_id, anchor) 的 anchor 一致 */
+  anchor: string
+}
+
+/** 设计页五段固定顺序：真实问题 → 学科贡献 → 学习目标 → 评价指标 → 证据计划 */
+export const DESIGN_SECTION_ORDER: DesignSection[] = [
+  { key: 'problem', label: '真实问题', anchor: 'problem' },
+  { key: 'contributions', label: '学科贡献', anchor: 'contributions' },
+  { key: 'goals', label: '学习目标', anchor: 'goals' },
+  { key: 'indicators', label: '评价指标', anchor: 'indicators' },
+  { key: 'evidence_plans', label: '证据计划', anchor: 'evidence_plans' },
+]
 
 // ── 创建向导表单 ────────────────────────────────────────────────
 /**

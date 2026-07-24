@@ -113,9 +113,11 @@ export function patchContributionApi(
 export function removeContributionApi(
   projectId: string,
   contributionId: string,
+  confirm = false,
 ) {
   return http.delete<ApiResponse<null>>(
     `/projects/${projectId}/design/contributions/${contributionId}`,
+    { params: confirm ? { confirm: true } : undefined },
   )
 }
 
@@ -145,9 +147,10 @@ export function patchGoalApi(
   )
 }
 
-export function removeGoalApi(projectId: string, goalId: string) {
+export function removeGoalApi(projectId: string, goalId: string, confirm = false) {
   return http.delete<ApiResponse<null>>(
     `/projects/${projectId}/design/goals/${goalId}`,
+    { params: confirm ? { confirm: true } : undefined },
   )
 }
 
@@ -176,9 +179,14 @@ export function patchIndicatorApi(
   )
 }
 
-export function removeIndicatorApi(projectId: string, indicatorId: string) {
+export function removeIndicatorApi(
+  projectId: string,
+  indicatorId: string,
+  confirm = false,
+) {
   return http.delete<ApiResponse<null>>(
     `/projects/${projectId}/design/indicators/${indicatorId}`,
+    { params: confirm ? { confirm: true } : undefined },
   )
 }
 

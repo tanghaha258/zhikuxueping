@@ -6,12 +6,13 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user, require_roles
 from app.core.exceptions import AppException
-from app.core.response import success_response
+from app.core.response import error_response, success_response
 from app.db.session import get_db
 from app.models.user import User
 from app.modules.project_designs import service
@@ -121,13 +122,25 @@ def update_contribution_api(
 def remove_contribution_api(
     project_id: str,
     contribution_id: str,
+    confirm: bool = Query(False, description="确认破坏性删除（如移除核心学科）"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_roles(["teacher", "school_admin", "admin"])),
 ):
     try:
-        service.remove_contribution(db, current_user, project_id, contribution_id)
+        impact = service.remove_contribution(
+            db, current_user, project_id, contribution_id, confirm=confirm
+        )
     except AppException:
         raise
+    if impact is not None:
+        return JSONResponse(
+            status_code=409,
+            content=error_response(
+                code=40901,
+                message="该学科为核心学科，移除将清空项目核心学科，需显式确认",
+                data=impact,
+            ),
+        )
     return success_response(message="已移除学科贡献")
 
 
@@ -172,13 +185,25 @@ def update_goal_api(
 def delete_goal_api(
     project_id: str,
     goal_id: str,
+    confirm: bool = Query(False, description="确认级联删除关联指标与证据计划"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_roles(["teacher", "school_admin", "admin"])),
 ):
     try:
-        service.remove_goal(db, current_user, project_id, goal_id)
+        impact = service.remove_goal(
+            db, current_user, project_id, goal_id, confirm=confirm
+        )
     except AppException:
         raise
+    if impact is not None:
+        return JSONResponse(
+            status_code=409,
+            content=error_response(
+                code=40901,
+                message="目标仍被指标引用，删除将级联清除关联指标与证据计划，需显式确认",
+                data=impact,
+            ),
+        )
     return success_response(message="已删除学习目标")
 
 
@@ -228,13 +253,25 @@ def update_indicator_api(
 def delete_indicator_api(
     project_id: str,
     indicator_id: str,
+    confirm: bool = Query(False, description="确认级联删除关联证据计划"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_roles(["teacher", "school_admin", "admin"])),
 ):
     try:
-        service.remove_indicator(db, current_user, project_id, indicator_id)
+        impact = service.remove_indicator(
+            db, current_user, project_id, indicator_id, confirm=confirm
+        )
     except AppException:
         raise
+    if impact is not None:
+        return JSONResponse(
+            status_code=409,
+            content=error_response(
+                code=40901,
+                message="指标仍被证据计划引用，删除将级联清除关联证据计划，需显式确认",
+                data=impact,
+            ),
+        )
     return success_response(message="已删除指标")
 
 

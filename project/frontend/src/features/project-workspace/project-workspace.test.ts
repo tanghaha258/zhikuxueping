@@ -20,12 +20,16 @@ import {
   resolveNextStep,
   saveDraft,
   validateStep,
+  anchorFromFixRoute,
+  formatCompletionSummary,
+  parseDeletionImpact,
 } from './composables/useProjectWorkspace'
 import type {
   ProjectDesignSnapshot,
   ProjectValidationResult,
   ProjectWizardDraft,
 } from './types'
+import { DESIGN_SECTION_ORDER } from './types'
 
 // ── 测试夹具 ────────────────────────────────────────────────────
 function makeDraft(overrides: Partial<ProjectWizardDraft> = {}): ProjectWizardDraft {
@@ -372,5 +376,147 @@ describe('mapServerError 服务端错误映射', () => {
     expect(mapped.status).toBe(500)
     expect(mapped.step).toBeNull()
     expect(mapped.message).toBe('服务器内部错误')
+  })
+})
+
+// ============================================================
+// 5. Task 7：关联删除确认、修复路由与完整度摘要
+// ============================================================
+describe('parseDeletionImpact 关联删除影响解析', () => {
+  function makeAxiosError(status: number, data: unknown) {
+    return { response: { status, data }, message: 'Request failed' }
+  }
+
+  it('非 409 错误返回 null', () => {
+    expect(parseDeletionImpact(makeAxiosError(500, {}))).toBeNull()
+  })
+
+  it('无 response 的错误返回 null', () => {
+    expect(parseDeletionImpact(new Error('Network Error'))).toBeNull()
+  })
+
+  it('409 但无 requires_confirmation 返回 null', () => {
+    const err = makeAxiosError(409, { code: 40901, message: '状态冲突' })
+    expect(parseDeletionImpact(err)).toBeNull()
+  })
+
+  it('409 带 requires_confirmation=true 与 indicators 引用计数', () => {
+    const err = makeAxiosError(409, {
+      code: 40901,
+      message: '需确认',
+      data: {
+        requires_confirmation: true,
+        referenced_by: { indicators: 3 },
+      },
+    })
+    const impact = parseDeletionImpact(err)
+    expect(impact).not.toBeNull()
+    expect(impact!.requiresConfirmation).toBe(true)
+    expect(impact!.referencedBy?.indicators).toBe(3)
+  })
+
+  it('409 带 will_clear_core_subject=true', () => {
+    const err = makeAxiosError(409, {
+      data: {
+        requires_confirmation: true,
+        will_clear_core_subject: true,
+      },
+    })
+    const impact = parseDeletionImpact(err)
+    expect(impact).not.toBeNull()
+    expect(impact!.willClearCoreSubject).toBe(true)
+  })
+
+  it('兼容 camelCase 键名', () => {
+    const err = makeAxiosError(409, {
+      data: {
+        requiresConfirmation: true,
+        referencedBy: { indicators: 2, evidencePlans: 1 },
+      },
+    })
+    const impact = parseDeletionImpact(err)
+    expect(impact).not.toBeNull()
+    expect(impact!.requiresConfirmation).toBe(true)
+    expect(impact!.referencedBy?.indicators).toBe(2)
+    expect(impact!.referencedBy?.evidencePlans).toBe(1)
+  })
+})
+
+describe('anchorFromFixRoute 修复路由锚点提取', () => {
+  it('正常路由返回锚点名', () => {
+    expect(anchorFromFixRoute('/projects/123/design#problem')).toBe('problem')
+  })
+
+  it('无 # 返回空字符串', () => {
+    expect(anchorFromFixRoute('/projects/123/design')).toBe('')
+  })
+
+  it('undefined 返回空字符串', () => {
+    expect(anchorFromFixRoute(undefined)).toBe('')
+  })
+
+  it('null 返回空字符串', () => {
+    expect(anchorFromFixRoute(null)).toBe('')
+  })
+
+  it('空字符串返回空字符串', () => {
+    expect(anchorFromFixRoute('')).toBe('')
+  })
+})
+
+describe('formatCompletionSummary 完整度摘要', () => {
+  it('null 返回全 0', () => {
+    const s = formatCompletionSummary(null)
+    expect(s.percent).toBe(0)
+    expect(s.blockerCount).toBe(0)
+    expect(s.warningCount).toBe(0)
+  })
+
+  it('正常返回百分比与计数', () => {
+    const val = makeValidation({
+      canActivate: false,
+      blockers: [
+        { code: 'A', field: 'f', message: 'm' },
+        { code: 'B', field: 'f', message: 'm' },
+      ],
+      warnings: [{ code: 'W', field: 'f', message: 'm' }],
+      completion: 0.756,
+    })
+    const s = formatCompletionSummary(val)
+    expect(s.percent).toBe(76)
+    expect(s.blockerCount).toBe(2)
+    expect(s.warningCount).toBe(1)
+  })
+
+  it('completion=1 返回 100%', () => {
+    const val = makeValidation({ canActivate: true, completion: 1 })
+    const s = formatCompletionSummary(val)
+    expect(s.percent).toBe(100)
+    expect(s.blockerCount).toBe(0)
+  })
+})
+
+describe('DESIGN_SECTION_ORDER 设计页五段固定顺序', () => {
+  it('顺序为 真实问题→学科贡献→学习目标→评价指标→证据计划', () => {
+    const keys = DESIGN_SECTION_ORDER.map((s) => s.key)
+    expect(keys).toEqual([
+      'problem',
+      'contributions',
+      'goals',
+      'indicators',
+      'evidence_plans',
+    ])
+  })
+
+  it('每段都有 key/label/anchor 且 anchor 与 key 一致', () => {
+    for (const section of DESIGN_SECTION_ORDER) {
+      expect(section.key).toBeTruthy()
+      expect(section.label).toBeTruthy()
+      expect(section.anchor).toBe(section.key)
+    }
+  })
+
+  it('共五段，不嵌套额外卡片', () => {
+    expect(DESIGN_SECTION_ORDER).toHaveLength(5)
   })
 })
