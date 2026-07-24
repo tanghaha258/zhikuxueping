@@ -5,8 +5,8 @@ import { Search, Upload, Delete, Document, VideoCamera, Picture, Link, Connectio
 import { listResourcesApi, createResourceApi, deleteResourceApi } from '@/api/resources'
 import { listProjectsApi } from '@/api/projects'
 import { uploadFileApi } from '@/api/upload'
-import { linkContextApi, listContextLinksByArtifactApi, type ContextLink } from '@/features/tool-context/api'
-import { validateToolContext, type ProjectPhase, type ToolContext } from '@/features/tool-context/types'
+import { linkContextApi, listContextLinksByArtifactApi } from '@/features/tool-context/api'
+import { validateToolContext, type ContextLink, type ProjectPhase, type ToolContext } from '@/features/tool-context/types'
 import type { Resource, Project } from '@/types'
 import { formatDate } from '@/utils/format'
 
