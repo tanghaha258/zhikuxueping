@@ -187,19 +187,37 @@ def update_contribution(
 
 
 def remove_contribution(
-    db: Session, actor: User, project_id: str, contribution_id: str
-) -> None:
+    db: Session,
+    actor: User,
+    project_id: str,
+    contribution_id: str,
+    *,
+    confirm: bool = False,
+) -> dict | None:
+    """移除学科贡献。
+
+    核心学科被移除会清空项目主表 `core_subject_id`，属破坏性操作：
+    - 未带 `confirm=True` 时返回引用影响，不执行删除；
+    - `confirm=True` 时执行删除并同步清空主表字段。
+    支撑学科无下游引用，可直接删除。返回 impact dict 表示需要确认。
+    """
     project = _load_project(db, project_id)
     ensure_design_editable(actor, project, _class_ids(db, project_id))
     repository = ProjectDesignRepository(db)
     contribution = repository.get_contribution(contribution_id)
     if not contribution or contribution.project_id != project_id:
         raise AppException(code=40401, message="学科贡献不存在", status_code=404)
+    if contribution.role == SubjectRole.CORE and not confirm:
+        return {
+            "requires_confirmation": True,
+            "will_clear_core_subject": True,
+        }
     # 移除核心学科时同步清空主表字段，避免一致性缺口。
     if contribution.role == SubjectRole.CORE and project.core_subject_id == contribution.subject_id:
         project.core_subject_id = None
     repository.delete_contribution(contribution)
     _commit(db)
+    return None
 
 
 # ── LearningGoal ──────────────────────────────────────────────
@@ -246,24 +264,40 @@ def update_goal(
 
 
 def remove_goal(
-    db: Session, actor: User, project_id: str, goal_id: str
-) -> None:
+    db: Session,
+    actor: User,
+    project_id: str,
+    goal_id: str,
+    *,
+    confirm: bool = False,
+) -> dict | None:
+    """删除学习目标。
+
+    被指标引用时属关联删除：
+    - 未带 `confirm=True` 返回引用影响，不删除；
+    - `confirm=True` 级联删除指标及其证据计划，再删除目标。
+    返回 impact dict 表示需要确认。
+    """
     project = _load_project(db, project_id)
     ensure_design_editable(actor, project, _class_ids(db, project_id))
     repository = ProjectDesignRepository(db)
     goal = repository.get_goal(goal_id)
     if not goal or goal.project_id != project_id:
         raise AppException(code=40401, message="学习目标不存在", status_code=404)
-    # 拒绝删除仍被指标引用的目标，避免悬空指标。
     linked_indicators = repository.list_indicators_by_goal(goal_id)
-    if linked_indicators:
-        raise AppException(
-            code=40901,
-            message=f"目标仍被 {len(linked_indicators)} 个指标引用，不能删除",
-            status_code=409,
-        )
+    if linked_indicators and not confirm:
+        return {
+            "requires_confirmation": True,
+            "referenced_by": {"indicators": len(linked_indicators)},
+        }
+    # 级联删除：先清除指标引用的证据计划，再删除指标，最后删除目标。
+    for ind in linked_indicators:
+        for plan in repository.list_evidence_plans_by_indicator(ind.id):
+            repository.delete_evidence_plan(plan)
+        repository.delete_indicator(ind)
     repository.delete_goal(goal)
     _commit(db)
+    return None
 
 
 # ── EvaluationIndicator ───────────────────────────────────────
@@ -326,8 +360,20 @@ def update_indicator(
 
 
 def remove_indicator(
-    db: Session, actor: User, project_id: str, indicator_id: str
-) -> None:
+    db: Session,
+    actor: User,
+    project_id: str,
+    indicator_id: str,
+    *,
+    confirm: bool = False,
+) -> dict | None:
+    """删除评价指标。
+
+    被证据计划引用时属关联删除：
+    - 未带 `confirm=True` 返回引用影响，不删除；
+    - `confirm=True` 级联删除证据计划，再删除指标。
+    返回 impact dict 表示需要确认。
+    """
     project = _load_project(db, project_id)
     ensure_design_editable(actor, project, _class_ids(db, project_id))
     repository = ProjectDesignRepository(db)
@@ -335,14 +381,16 @@ def remove_indicator(
     if not indicator or indicator.project_id != project_id:
         raise AppException(code=40401, message="评价指标不存在", status_code=404)
     linked_plans = repository.list_evidence_plans_by_indicator(indicator_id)
-    if linked_plans:
-        raise AppException(
-            code=40901,
-            message=f"指标仍被 {len(linked_plans)} 个证据计划引用，不能删除",
-            status_code=409,
-        )
+    if linked_plans and not confirm:
+        return {
+            "requires_confirmation": True,
+            "referenced_by": {"evidence_plans": len(linked_plans)},
+        }
+    for plan in linked_plans:
+        repository.delete_evidence_plan(plan)
     repository.delete_indicator(indicator)
     _commit(db)
+    return None
 
 
 # ── EvidencePlan ──────────────────────────────────────────────

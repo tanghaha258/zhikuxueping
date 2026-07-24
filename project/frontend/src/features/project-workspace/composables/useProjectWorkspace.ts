@@ -12,6 +12,7 @@ import {
   validateActivationApi,
 } from '../api'
 import type {
+  DeletionImpact,
   ProjectDesignSnapshot,
   ProjectValidationResult,
   ProjectWizardDraft,
@@ -20,7 +21,7 @@ import type {
   MappedServerError,
   WizardStep,
 } from '../types'
-import { WIZARD_STEPS } from '../types'
+import { DESIGN_SECTION_ORDER, WIZARD_STEPS } from '../types'
 
 // ============================================================
 // 纯函数：草稿恢复
@@ -372,6 +373,71 @@ export function canEditDesign(projectStatus: string): boolean {
 }
 
 // ============================================================
+// 纯函数：设计页完整度与删除确认（Task 7）
+// ============================================================
+
+/**
+ * 从关联删除的 409 响应中解析引用影响。
+ *
+ * 后端在未带 `confirm=true` 删除被引用实体时返回 409，body.data 携带影响信息。
+ * 注意：HTTP 拦截器的错误路径不做 camelCase 转换，因此这里同时兼容 snake_case
+ * 与 camelCase 两种键名。
+ *
+ * 返回 null 表示不是"需要确认"的 409（可能是其他状态机冲突），调用方应按普通错误处理。
+ */
+export function parseDeletionImpact(err: unknown): DeletionImpact | null {
+  const e = err as AxiosError<{ data?: Record<string, unknown> }>
+  if (e.response?.status !== 409) return null
+  const payload = e.response?.data?.data
+  if (!payload || typeof payload !== 'object') return null
+  const requires =
+    (payload.requires_confirmation as boolean | undefined) ??
+    (payload.requiresConfirmation as boolean | undefined)
+  if (!requires) return null
+  const referencedByRaw =
+    (payload.referenced_by as Record<string, number> | undefined) ??
+    (payload.referencedBy as Record<string, number> | undefined)
+  return {
+    requiresConfirmation: true,
+    referencedBy: referencedByRaw
+      ? {
+          indicators: referencedByRaw.indicators,
+          evidencePlans: referencedByRaw.evidence_plans ?? referencedByRaw.evidencePlans,
+        }
+      : undefined,
+    willClearCoreSubject:
+      ((payload.will_clear_core_subject as boolean | undefined) ??
+        (payload.willClearCoreSubject as boolean | undefined)) || undefined,
+  }
+}
+
+/**
+ * 从修复路由中提取锚点名（`#` 之后的部分）。
+ *
+ * 后端返回的 `fix_route` 形如 `/projects/{id}/design#problem`，
+ * 前端据此滚动到对应编辑区并高亮。
+ */
+export function anchorFromFixRoute(fixRoute: string | undefined | null): string {
+  if (!fixRoute) return ''
+  const idx = fixRoute.indexOf('#')
+  return idx >= 0 ? fixRoute.slice(idx + 1) : ''
+}
+
+/**
+ * 将完整度结果转为右侧栏紧凑展示所需的摘要。
+ */
+export function formatCompletionSummary(
+  validation: ProjectValidationResult | null,
+): { percent: number; blockerCount: number; warningCount: number } {
+  if (!validation) return { percent: 0, blockerCount: 0, warningCount: 0 }
+  return {
+    percent: Math.round(validation.completion * 100),
+    blockerCount: validation.blockers.length,
+    warningCount: validation.warnings.length,
+  }
+}
+
+// ============================================================
 // 组合式函数：项目工作区状态
 // ============================================================
 
@@ -496,5 +562,5 @@ export function useProjectWorkspace(options: UseProjectWorkspaceOptions) {
   }
 }
 
-export { WIZARD_STEPS }
+export { WIZARD_STEPS, DESIGN_SECTION_ORDER }
 export type { WizardStep }
