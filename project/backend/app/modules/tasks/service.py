@@ -15,6 +15,8 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppException
@@ -24,17 +26,22 @@ from app.models.enums import (
     TaskPublishStatus,
     TeachingStage,
 )
+from app.models.project import ProjectStatus
 from app.models.task import Task, TaskStatus
 from app.models.task_dependency import TaskDependency
 from app.models.user import Role, User
+from app.modules.projects.policy import project_visibility_filter
 from app.modules.projects.service import is_student_assignable_to_project
 from app.modules.resources.repository import ResourceRepository
 from app.modules.tasks.policy import ensure_can_manage_task, ensure_can_read_task
 from app.modules.tasks.repository import TaskRepository
 from app.schemas.task import (
+    TaskCenterItem,
+    TaskCenterResponse,
     TaskCreate,
     TaskDependencyListResponse,
     TaskDependencyResponse,
+    TaskProgress,
     TaskPublishPreview,
     TaskResponse,
     TaskTransitionRequest,
@@ -145,15 +152,13 @@ def update_task(db: Session, actor: User, task_id: str, data: TaskUpdate) -> Tas
     ensure_can_manage_task(actor, project, class_ids)
     updates = data.model_dump(exclude_unset=True)
     # 枚举字段需转换；publish_status 不在此设置，由 /transition 端点强制状态机。
+    # Task 9：执行进度（task.status）不再允许通过 update 写回，进度由分配与提交聚合。
     if "stage" in updates:
         task.stage = _parse_stage(updates.pop("stage"))
     if "tier" in updates:
         task.tier = _parse_tier(updates.pop("tier"))
     if "submission_type" in updates:
         task.submission_type = _parse_submission_type(updates.pop("submission_type"))
-    if "status" in updates:
-        # status 仍允许通过 update 修改（保持向后兼容），但需校验枚举值
-        task.status = _parse_task_status(updates.pop("status"))
     for field, value in updates.items():
         setattr(task, field, value)
     return _commit_and_refresh(db, task)
@@ -358,6 +363,21 @@ def transition_publish_status(
                 message="至少分配一名学生后才能发布任务",
                 status_code=422,
             )
+        # Task 9：项目归档后任务不得发布
+        if project.status == ProjectStatus.ARCHIVED:
+            raise AppException(
+                code=42201,
+                message="项目已归档，归档项目下的任务不得发布",
+                status_code=422,
+            )
+        # Task 9：前置任务未关闭时不得发布（前置须 publish_status=CLOSED）
+        predecessor_statuses = repository.list_predecessor_publish_statuses(task_id)
+        if any(ps != TaskPublishStatus.CLOSED.value for ps in predecessor_statuses):
+            raise AppException(
+                code=42201,
+                message="存在未关闭的前置任务，前置任务关闭后才能发布后续任务",
+                status_code=422,
+            )
 
     task.publish_status = target
     if target == TaskPublishStatus.SCHEDULED:
@@ -401,13 +421,13 @@ def publish_preview(db: Session, actor: User, task_id: str) -> TaskPublishPrevie
         for r in resources
     ]
 
-    # 前置任务就绪检查：所有前置任务 status 为 EVALUATED 视为完成
+    # 前置任务就绪检查（Task 9）：前置 publish_status=CLOSED 视为完成
     predecessor_deps = repository.list_predecessors(task_id)
     predecessors_ready = True
     pending_predecessors: list[str] = []
     for dep in predecessor_deps:
         pred = repository.get(dep.predecessor_id)
-        if pred is None or pred.status != TaskStatus.EVALUATED:
+        if pred is None or pred.publish_status != TaskPublishStatus.CLOSED:
             predecessors_ready = False
             pending_predecessors.append(
                 pred.title if pred else dep.predecessor_id
@@ -426,20 +446,24 @@ def publish_preview(db: Session, actor: User, task_id: str) -> TaskPublishPrevie
             f"任务当前发布状态为 {task.publish_status.value}，仅草稿/定时状态可发布"
         )
 
+    # Task 9：项目归档后任务不得发布
+    if project.status == ProjectStatus.ARCHIVED:
+        blockers.append("项目已归档，归档项目下的任务不得发布")
+
     # 发布阻断（Task 1）：无分配学生为硬性阻断，不能发布
     if not assigned_students:
         blockers.append("至少分配一名学生后才能发布任务")
 
+    # Task 9：前置未就绪为硬性阻断（不再仅 warning）
+    if predecessor_deps and not predecessors_ready:
+        blockers.append(
+            "存在未关闭的前置任务，前置任务关闭后才能发布后续任务："
+            + "、".join(pending_predecessors)
+        )
+
     # 警告：无关联资源
     if not resources_payload:
         warnings.append("未关联已发布资源，学生将看不到对应层级的资源支撑")
-
-    # 警告：前置未就绪
-    if predecessor_deps and not predecessors_ready:
-        warnings.append(
-            "部分前置任务尚未完成（status 非 evaluated）："
-            + "、".join(pending_predecessors)
-        )
 
     return TaskPublishPreview(
         task=TaskResponse.model_validate(task),
@@ -448,6 +472,104 @@ def publish_preview(db: Session, actor: User, task_id: str) -> TaskPublishPrevie
         dependencies_ready=dependencies_ready,
         blockers=blockers,
         warnings=warnings,
+    )
+
+
+def get_task_progress(db: Session, actor: User, task_id: str) -> TaskProgress:
+    """任务执行进度汇总（Task 9）：从 TaskAssignment 与 Submission 聚合。
+
+    不读取/写回 task.status；进度仅由分配与提交聚合得出。
+    仅教师/学校管理员/管理员可调用（管理视图）。
+    """
+    repository = TaskRepository(db)
+    task = _require_task(repository, task_id)
+    project, class_ids = _project_context(repository, task.project_id)
+    ensure_can_manage_task(actor, project, class_ids)
+
+    total_students = repository.count_assignments(task_id)
+    submitted = repository.count_submitted_students(task_id)
+    evaluated = repository.count_evaluated_students(task_id)
+    pending = max(total_students - submitted, 0)
+    progress_rate = (submitted / total_students) if total_students > 0 else 0.0
+    return TaskProgress(
+        total_students=total_students,
+        submitted=submitted,
+        evaluated=evaluated,
+        pending=pending,
+        progress_rate=progress_rate,
+    )
+
+
+def get_task_center(db: Session, actor: User) -> TaskCenterResponse:
+    """跨项目任务中心（Task 9）：聚合 actor 可管理项目下的任务，按待办分类桶组织。
+
+    分类规则（与前端 buildTaskCenterBuckets 对齐）：
+    - to_publish：publish_status 为 draft/scheduled
+    - in_progress：publish_status 为 published/in_progress
+    - due_soon：进行中且截止时间在 3 天内（含无截止时间的不计入）
+    - unsubmitted：进行中且有未提交学生（submitted < total_students）
+    - to_close：publish_status 为 in_progress（待教师关闭）
+    """
+    if actor.role not in {Role.ADMIN, Role.SCHOOL_ADMIN, Role.TEACHER}:
+        raise AppException(code=40301, message="permission denied", status_code=403)
+
+    repository = TaskRepository(db)
+    visibility_filter = project_visibility_filter(actor)
+    rows = repository.list_for_center(visibility_filter)
+
+    to_publish: list[TaskCenterItem] = []
+    in_progress: list[TaskCenterItem] = []
+    due_soon: list[TaskCenterItem] = []
+    unsubmitted: list[TaskCenterItem] = []
+    to_close: list[TaskCenterItem] = []
+
+    now = datetime.now(timezone.utc)
+    for task, project_title in rows:
+        total_students = repository.count_assignments(task.id)
+        submitted = repository.count_submitted_students(task.id)
+        item = TaskCenterItem(
+            id=task.id,
+            title=task.title,
+            project_id=task.project_id,
+            project_title=project_title,
+            stage=task.stage.value if task.stage else None,
+            tier=task.tier.value if task.tier else None,
+            publish_status=task.publish_status.value if task.publish_status else None,
+            deadline=task.deadline,
+            task_type=task.task_type,
+            max_score=task.max_score,
+            submission_count=submitted,
+            total_students=total_students,
+        )
+        status_val = task.publish_status
+        if status_val in (TaskPublishStatus.DRAFT, TaskPublishStatus.SCHEDULED):
+            to_publish.append(item)
+        elif status_val in (
+            TaskPublishStatus.PUBLISHED,
+            TaskPublishStatus.IN_PROGRESS,
+        ):
+            in_progress.append(item)
+            # 临期：截止时间在 3 天内
+            if task.deadline:
+                deadline_utc = task.deadline
+                if deadline_utc.tzinfo is None:
+                    deadline_utc = deadline_utc.replace(tzinfo=timezone.utc)
+                delta = (deadline_utc - now).total_seconds()
+                if 0 <= delta <= 3 * 24 * 3600:
+                    due_soon.append(item)
+            # 未提交：有分配学生但提交数不足
+            if total_students > 0 and submitted < total_students:
+                unsubmitted.append(item)
+            # 待关闭：进行中状态
+            if status_val == TaskPublishStatus.IN_PROGRESS:
+                to_close.append(item)
+
+    return TaskCenterResponse(
+        to_publish=to_publish,
+        in_progress=in_progress,
+        due_soon=due_soon,
+        unsubmitted=unsubmitted,
+        to_close=to_close,
     )
 
 

@@ -392,7 +392,7 @@ class TestPublishPreview:
         assert len(data["blockers"]) >= 1
 
     def test_preview_dependencies_not_ready(self, client):
-        """前置任务未完成时，dependencies_ready=False 且有 warning。"""
+        """前置任务未完成时，dependencies_ready=False 且为 blocker（Task 9：不得发布）。"""
         ctx = _setup(client)
         a = _create_task(client, ctx["teacher_token"], ctx["project_id"], "前置A",
                          student_ids=[ctx["student_id"]])
@@ -403,7 +403,8 @@ class TestPublishPreview:
                        headers=_headers(ctx["teacher_token"]))
         data = r.json()["data"]
         assert data["dependencies_ready"] is False
-        assert any("前置" in w for w in data["warnings"])
+        # Task 9：前置未就绪为硬性 blocker（不再仅 warning）
+        assert any("前置" in b_ for b_ in data["blockers"])
 
 
 # ── 学生权限（计划 3.7）────────────────────────────────────
@@ -547,3 +548,217 @@ class TestTaskAssignmentAndPublishBlocking:
         )
         assert r.status_code == 422
         assert "不属于项目关联班级" in r.json()["message"]
+
+
+# ── Task 9：发布阻断扩展（前置未满足、项目归档）────────────────
+class TestTask9PublishBlocking:
+    """Task 9 验收：前置任务不满足、项目已归档时一律不得发布。"""
+
+    def test_publish_blocked_when_prerequisites_not_satisfied(self, client):
+        """前置任务未关闭时，后置任务不得发布（422）。"""
+        ctx = _setup(client)
+        a = _create_task(client, ctx["teacher_token"], ctx["project_id"], "前置A",
+                         student_ids=[ctx["student_id"]])
+        b = _create_task(client, ctx["teacher_token"], ctx["project_id"], "后置B",
+                         student_ids=[ctx["student_id"]])
+        _add_dependency(client, ctx["teacher_token"], b["id"], a["id"])
+        # A 仍为 draft，未关闭 → B 不得发布
+        r = _transition(client, ctx["teacher_token"], b["id"], "published")
+        assert r.status_code == 422
+        assert "前置" in r.json()["message"]
+        # b 仍为 draft
+        detail = client.get(f"/api/v1/tasks/{b['id']}",
+                            headers=_headers(ctx["teacher_token"])).json()["data"]
+        assert detail["publish_status"] == "draft"
+
+    def test_publish_allowed_when_prerequisites_closed(self, client):
+        """前置任务已关闭时，后置任务可发布。"""
+        ctx = _setup(client)
+        a = _create_task(client, ctx["teacher_token"], ctx["project_id"], "前置A",
+                         student_ids=[ctx["student_id"]])
+        b = _create_task(client, ctx["teacher_token"], ctx["project_id"], "后置B",
+                         student_ids=[ctx["student_id"]])
+        _add_dependency(client, ctx["teacher_token"], b["id"], a["id"])
+        # 关闭 A：published → in_progress → closed
+        _transition(client, ctx["teacher_token"], a["id"], "published")
+        _transition(client, ctx["teacher_token"], a["id"], "in_progress")
+        _transition(client, ctx["teacher_token"], a["id"], "closed")
+        r = _transition(client, ctx["teacher_token"], b["id"], "published")
+        assert r.status_code == 200
+        assert r.json()["data"]["publish_status"] == "published"
+
+    def test_publish_blocked_when_project_archived(self, client, db_session):
+        """项目归档后任务不得发布（422）。"""
+        from app.models.project import Project, ProjectStatus
+        ctx = _setup(client)
+        t = _create_task(client, ctx["teacher_token"], ctx["project_id"], "归档项目任务",
+                         student_ids=[ctx["student_id"]])
+        # 直接将项目置为 ARCHIVED（绕过完整状态机，专注任务阻断）
+        proj = db_session.get(Project, ctx["project_id"])
+        proj.status = ProjectStatus.ARCHIVED
+        db_session.commit()
+        r = _transition(client, ctx["teacher_token"], t["id"], "published")
+        assert r.status_code == 422
+        assert "归档" in r.json()["message"]
+        # 任务仍为 draft
+        detail = client.get(f"/api/v1/tasks/{t['id']}",
+                            headers=_headers(ctx["teacher_token"])).json()["data"]
+        assert detail["publish_status"] == "draft"
+
+    def test_preview_lists_prerequisite_and_archived_as_blockers(self, client, db_session):
+        """发布预览将前置未就绪与归档项目列为 blockers（非 warnings）。"""
+        from app.models.project import Project, ProjectStatus
+        ctx = _setup(client)
+        a = _create_task(client, ctx["teacher_token"], ctx["project_id"], "前置A",
+                         student_ids=[ctx["student_id"]])
+        b = _create_task(client, ctx["teacher_token"], ctx["project_id"], "后置B",
+                         student_ids=[ctx["student_id"]])
+        _add_dependency(client, ctx["teacher_token"], b["id"], a["id"])
+        proj = db_session.get(Project, ctx["project_id"])
+        proj.status = ProjectStatus.ARCHIVED
+        db_session.commit()
+        r = client.get(f"/api/v1/tasks/{b['id']}/publish-preview",
+                       headers=_headers(ctx["teacher_token"]))
+        data = r.json()["data"]
+        # 前置未就绪与归档均为 blocker
+        assert any("前置" in b_ for b_ in data["blockers"])
+        assert any("归档" in b_ for b_ in data["blockers"])
+
+
+# ── Task 9：执行进度聚合（不从 task.status 写回）──────────────
+class TestTask9ProgressAggregation:
+    """Task 9 验收：执行进度从分配与提交聚合，不再写回全局 task.status。"""
+
+    def test_update_task_status_field_rejected(self, client):
+        """TaskUpdate 不再接受 status 字段（执行进度不可直接写入）。"""
+        ctx = _setup(client)
+        t = _create_task(client, ctx["teacher_token"], ctx["project_id"], "进度任务",
+                         student_ids=[ctx["student_id"]])
+        r = client.put(
+            f"/api/v1/tasks/{t['id']}",
+            json={"status": "submitted"},
+            headers=_headers(ctx["teacher_token"]),
+        )
+        # status 字段被忽略或拒绝，任务 status 不变
+        assert r.status_code == 200
+        detail = r.json()["data"]
+        assert detail["status"] == "pending"
+
+    def test_progress_aggregated_from_assignments_and_submissions(self, client):
+        """GET /tasks/{id}/progress 从分配与提交聚合，而非读取 task.status。"""
+        ctx = _setup(client)
+        # 注册第二名学生（同班级）
+        cls1_id = client.get(
+            f"/api/v1/projects/{ctx['project_id']}",
+            headers=_headers(ctx["teacher_token"]),
+        ).json()["data"].get("class_ids", [])
+        # 通过项目学生接口拿到当前学生；再注册一名同班学生
+        students = client.get(
+            f"/api/v1/projects/{ctx['project_id']}/students",
+            headers=_headers(ctx["teacher_token"]),
+        ).json()["data"]
+        first_student_id = students[0]["id"]
+        first_class_id = students[0]["class_id"]
+
+        global _counter
+        _counter += 1
+        tag = f"tc{_counter}"
+        s2 = _register(client, f"tcs2_{tag}", "student", class_id=first_class_id)
+        second_student_id = s2["id"]
+
+        t = _create_task(client, ctx["teacher_token"], ctx["project_id"], "聚合任务",
+                         student_ids=[first_student_id, second_student_id])
+        _transition(client, ctx["teacher_token"], t["id"], "published")
+        # 第一名学生提交
+        client.post(
+            "/api/v1/submissions",
+            json={"task_id": t["id"], "content": "学生1的提交"},
+            headers=_headers(ctx["student_token"]),
+        )
+        # 第二名学生未提交
+        r = client.get(f"/api/v1/tasks/{t['id']}/progress",
+                       headers=_headers(ctx["teacher_token"]))
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["total_students"] == 2
+        assert data["submitted"] == 1
+        assert data["pending"] == 1
+        # task.status 仍为 pending（未因学生提交而写回）
+        task_detail = client.get(f"/api/v1/tasks/{t['id']}",
+                                 headers=_headers(ctx["teacher_token"])).json()["data"]
+        assert task_detail["status"] == "pending"
+
+
+# ── Task 9：跨项目任务中心 ───────────────────────────────────
+class TestTask9TaskCenter:
+    """Task 9 验收：跨项目任务中心聚合所有可管理项目的任务。"""
+
+    def test_center_aggregates_across_manageable_projects(self, client):
+        ctx = _setup(client)
+        # 复用项目1的班级，使第二名学生可被分配到项目2
+        proj1_class_ids = client.get(
+            f"/api/v1/projects/{ctx['project_id']}",
+            headers=_headers(ctx["teacher_token"]),
+        ).json()["data"].get("class_ids", [])
+        # 第二个项目（关联同一班级）
+        proj2 = client.post(
+            "/api/v1/projects", json={"title": "项目2", "class_ids": proj1_class_ids},
+            headers=_headers(ctx["teacher_token"]),
+        ).json()["data"]
+        # 项目1：草稿任务（待发布）
+        _create_task(client, ctx["teacher_token"], ctx["project_id"], "待发布任务",
+                     student_ids=[ctx["student_id"]])
+        # 项目2：已发布任务（进行中）
+        t2 = _create_task(client, ctx["teacher_token"], proj2["id"], "进行中任务",
+                          student_ids=[ctx["student_id"]])
+        _transition(client, ctx["teacher_token"], t2["id"], "published")
+        r = client.get("/api/v1/tasks/center",
+                       headers=_headers(ctx["teacher_token"]))
+        assert r.status_code == 200
+        data = r.json()["data"]
+        # 必须包含分类桶
+        assert "to_publish" in data
+        assert "in_progress" in data
+        assert "due_soon" in data
+        assert "unsubmitted" in data
+        assert "to_close" in data
+        # 待发布桶包含项目1草稿任务
+        titles_to_publish = [it["title"] for it in data["to_publish"]]
+        assert "待发布任务" in titles_to_publish
+        # 进行中桶包含项目2已发布任务
+        titles_in_progress = [it["title"] for it in data["in_progress"]]
+        assert "进行中任务" in titles_in_progress
+        # 每项含 project_id 与 project_title
+        for it in data["to_publish"] + data["in_progress"]:
+            assert it["project_id"]
+            assert it["project_title"]
+
+    def test_center_excludes_other_teachers_projects(self, client):
+        ctx = _setup(client)
+        # 另一位教师的项目（不可管理）
+        global _counter
+        _counter += 1
+        tag = f"tc{_counter}"
+        _register(client, f"tco_{tag}", "teacher")
+        other_token = _login(client, f"tco_{tag}")["access_token"]
+        other_proj = client.post(
+            "/api/v1/projects", json={"title": "他人项目"},
+            headers=_headers(other_token),
+        ).json()["data"]
+        client.post(
+            "/api/v1/tasks",
+            json={"project_id": other_proj["id"], "title": "他人任务", "student_ids": []},
+            headers=_headers(other_token),
+        )
+        # 当前教师任务中心看不到他人项目任务
+        r = client.get("/api/v1/tasks/center",
+                       headers=_headers(ctx["teacher_token"]))
+        data = r.json()["data"]
+        all_titles = (
+            [it["title"] for it in data["to_publish"]]
+            + [it["title"] for it in data["in_progress"]]
+            + [it["title"] for it in data["due_soon"]]
+            + [it["title"] for it in data["unsubmitted"]]
+            + [it["title"] for it in data["to_close"]]
+        )
+        assert "他人任务" not in all_titles
