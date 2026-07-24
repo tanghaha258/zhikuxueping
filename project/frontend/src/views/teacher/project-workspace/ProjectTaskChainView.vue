@@ -188,6 +188,7 @@ const taskForm = ref({
   id: '',
   title: '',
   description: '',
+  rubric: '',
   task_type: 'assignment',
   max_score: 100,
   deadline: '',
@@ -204,7 +205,7 @@ function openCreateTask(stage?: string) {
   taskDialogMode.value = 'create'
   presetStage.value = stage || ''
   taskForm.value = {
-    id: '', title: '', description: '', task_type: 'assignment',
+    id: '', title: '', description: '', rubric: '', task_type: 'assignment',
     max_score: 100, deadline: '',
     stage: stage || 'pre_class',
     tier: 'foundation',
@@ -231,6 +232,7 @@ async function openEditTask(t: Task) {
     id: t.id,
     title: t.title,
     description: t.description || '',
+    rubric: (t as any).rubric || '',
     task_type: t.taskType || 'assignment',
     max_score: t.maxScore ?? 100,
     deadline: t.deadline || '',
@@ -302,6 +304,7 @@ async function submitTaskForm() {
   const payload: Record<string, unknown> = {
     title: f.title,
     description: f.description || undefined,
+    rubric: f.rubric || undefined,
     task_type: f.task_type,
     max_score: f.max_score,
     deadline: f.deadline || undefined,
@@ -704,6 +707,9 @@ onMounted(() => {
         </el-form-item>
         <el-form-item label="描述">
           <el-input v-model="taskForm.description" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="量规">
+          <el-input v-model="taskForm.rubric" type="textarea" :rows="3" placeholder="评分细则（多维度量规）" />
         </el-form-item>
         <el-form-item label="教学阶段">
           <el-select v-model="taskForm.stage" style="width: 100%">

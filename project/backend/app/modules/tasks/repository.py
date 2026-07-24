@@ -231,3 +231,59 @@ class TaskRepository:
             "total_resources": total_resources,
             "upcoming_deadlines": upcoming_deadlines,
         }
+
+    # ── Task 9：跨项目任务中心与执行进度聚合 ───────────────────
+    def list_for_center(self, visibility_filter) -> list[tuple[Task, str]]:
+        """返回 actor 可管理项目下的任务，附带项目标题。
+
+        `visibility_filter` 与 projects 模块一致：
+        - admin → None（全部）
+        - school_admin → Project.school_id == actor.school_id
+        - teacher → Project.creator_id == actor.id
+        - 其他角色 → 不返回任何任务
+        归档项目下的任务仍返回（用于"待关闭/归档"提醒），由服务层分类。
+        """
+        statement = (
+            select(Task, Project.title.label("project_title"))
+            .join(Project, Task.project_id == Project.id)
+            .order_by(Task.created_at.desc())
+        )
+        if visibility_filter is not None:
+            statement = statement.where(visibility_filter)
+        rows = self.db.execute(statement).all()
+        return [(row[0], row[1]) for row in rows]
+
+    def count_assignments(self, task_id: str) -> int:
+        return self.db.scalar(
+            select(func.count()).select_from(TaskAssignment).where(
+                TaskAssignment.task_id == task_id
+            )
+        ) or 0
+
+    def count_submitted_students(self, task_id: str) -> int:
+        """已提交学生数：submission.status 非 draft 的不同学生数。"""
+        return self.db.scalar(
+            select(func.count(func.distinct(Submission.student_id))).where(
+                Submission.task_id == task_id,
+                Submission.status != "draft",
+            )
+        ) or 0
+
+    def count_evaluated_students(self, task_id: str) -> int:
+        """已评价学生数：submission.status 为 evaluated 的不同学生数。"""
+        return self.db.scalar(
+            select(func.count(func.distinct(Submission.student_id))).where(
+                Submission.task_id == task_id,
+                Submission.status == "evaluated",
+            )
+        ) or 0
+
+    def list_predecessor_publish_statuses(self, task_id: str) -> list[str]:
+        """返回任务所有前置任务的 publish_status 值列表。"""
+        return list(
+            self.db.execute(
+                select(Task.publish_status)
+                .join(TaskDependency, TaskDependency.predecessor_id == Task.id)
+                .where(TaskDependency.successor_id == task_id)
+            ).scalars().all()
+        )

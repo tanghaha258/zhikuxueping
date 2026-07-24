@@ -30,6 +30,15 @@ def task_stats_api(
     return success_response(data=service.get_teacher_stats(db, current_user))
 
 
+@router.get("/center", summary="跨项目任务中心")
+def task_center_api(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(["teacher", "school_admin", "admin"])),
+):
+    """跨项目任务中心（Task 9）：聚合当前教师可管理项目的任务，按待办分类桶组织。"""
+    return success_response(data=service.get_task_center(db, current_user).model_dump())
+
+
 @router.get("")
 def list_tasks_api(
     project_id: str = Query(""),
@@ -260,6 +269,20 @@ def publish_preview_api(
     except ValueError as error:
         raise AppException(code=40401, message=str(error), status_code=404) from error
     return success_response(data=preview.model_dump())
+
+
+@router.get("/{task_id}/progress", summary="Task execution progress")
+def task_progress_api(
+    task_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(["teacher", "school_admin", "admin"])),
+):
+    """任务执行进度汇总（Task 9）：从分配与提交聚合，不读取 task.status。"""
+    try:
+        progress = service.get_task_progress(db, current_user, task_id)
+    except ValueError as error:
+        raise AppException(code=40401, message=str(error), status_code=404) from error
+    return success_response(data=progress.model_dump())
 
 
 def _task_response(task) -> dict:

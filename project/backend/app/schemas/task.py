@@ -24,7 +24,6 @@ class TaskUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     task_type: Optional[str] = None
-    status: Optional[str] = None
     max_score: Optional[int] = None
     deadline: Optional[datetime] = None
     rubric: Optional[str] = None
@@ -34,6 +33,8 @@ class TaskUpdate(BaseModel):
     submission_type: Optional[str] = None
     max_attempts: Optional[int] = None
     scheduled_at: Optional[datetime] = None
+
+    model_config = ConfigDict(extra="ignore")
 
 
 class TaskResponse(BaseModel):
@@ -121,6 +122,60 @@ class TaskPublishPreview(BaseModel):
     dependencies_ready: bool
     blockers: list[str]
     warnings: list[str]
+
+
+# ── Task 9：执行进度聚合（不从 task.status 写回）──────────────
+class TaskProgress(BaseModel):
+    """任务执行进度汇总（Task 9）：从 TaskAssignment 与 Submission 聚合，不读取 task.status。
+
+    - total_students：被分配学生总数
+    - submitted：已提交学生数（submission.status 非 draft）
+    - evaluated：已被教师评价完成的学生数
+    - pending：未提交学生数 = total_students - submitted
+    - progress_rate：提交率 = submitted / total_students（无学生时为 0）
+    """
+
+    total_students: int
+    submitted: int
+    evaluated: int
+    pending: int
+    progress_rate: float
+
+
+# ── Task 9：跨项目任务中心 ───────────────────────────────────
+class TaskCenterItem(BaseModel):
+    """任务中心单条任务（含项目信息，用于跨项目聚合与跳转）。"""
+
+    id: str
+    title: str
+    project_id: str
+    project_title: str
+    stage: Optional[str] = None
+    tier: Optional[str] = None
+    publish_status: Optional[str] = None
+    deadline: Optional[datetime] = None
+    task_type: str
+    max_score: int
+    submission_count: int
+    total_students: int
+
+
+class TaskCenterResponse(BaseModel):
+    """跨项目任务中心聚合响应（Task 9）：按待办分类桶组织。
+
+    分类规则（与前端 buildTaskCenterBuckets 对齐）：
+    - to_publish：publish_status 为 draft/scheduled 的任务
+    - in_progress：publish_status 为 published/in_progress 的任务
+    - due_soon：进行中且截止时间在 3 天内的任务
+    - unsubmitted：进行中且有未提交学生的任务
+    - to_close：publish_status 为 in_progress 的任务
+    """
+
+    to_publish: list[TaskCenterItem]
+    in_progress: list[TaskCenterItem]
+    due_soon: list[TaskCenterItem]
+    unsubmitted: list[TaskCenterItem]
+    to_close: list[TaskCenterItem]
 
 
 # 前向引用解析

@@ -13,6 +13,38 @@ import type {
   TaskStats,
 } from '@/types'
 
+// ── Task 9：跨项目任务中心类型（types/index.ts 不在 Task 9 范围，就地定义）──
+export interface TaskCenterItemDTO {
+  id: string
+  title: string
+  projectId: string
+  projectTitle: string
+  stage?: string
+  tier?: string
+  publishStatus?: string
+  deadline?: string
+  taskType: string
+  maxScore: number
+  submissionCount: number
+  totalStudents: number
+}
+
+export interface TaskCenterResponseDTO {
+  toPublish: TaskCenterItemDTO[]
+  inProgress: TaskCenterItemDTO[]
+  dueSoon: TaskCenterItemDTO[]
+  unsubmitted: TaskCenterItemDTO[]
+  toClose: TaskCenterItemDTO[]
+}
+
+export interface TaskProgressDTO {
+  totalStudents: number
+  submitted: number
+  evaluated: number
+  pending: number
+  progressRate: number
+}
+
 export function listTasksApi(params: {
   project_id: string
   skip?: number
@@ -96,4 +128,13 @@ export function getPublishPreviewApi(taskId: string) {
   return http.get<ApiResponse<TaskPublishPreview>>(
     `/tasks/${taskId}/publish-preview`,
   )
+}
+
+// ── Task 9：跨项目任务中心与执行进度 ─────────────────────────
+export function getTaskCenterApi() {
+  return http.get<ApiResponse<TaskCenterResponseDTO>>('/tasks/center')
+}
+
+export function getTaskProgressApi(taskId: string) {
+  return http.get<ApiResponse<TaskProgressDTO>>(`/tasks/${taskId}/progress`)
 }
